@@ -1,0 +1,6 @@
+# 第三方源码版本。修改后推送，vendor 工作流会自动下载并提交到 third_party/。
+# 取值："latest" 或具体版本号，如 "5.5.8"。
+# 实际下载的版本见 VERSIONS.txt；确定可用后应把 latest 改成具体版本号以固定下来。
+
+scintilla = "latest"
+lexilla = "latest"

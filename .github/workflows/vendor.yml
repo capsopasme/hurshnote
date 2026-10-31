@@ -1,0 +1,50 @@
+name: vendor
+
+# 下载 Scintilla / Lexilla 官方源码到 third_party/ 并提交。
+# 触发：修改 third_party/versions.toml 或脚本后推送，或在 Actions 页面手动运行。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - third_party/versions.toml
+      - scripts/vendor_third_party.py
+      - .github/workflows/vendor.yml
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 版本相同也重新下载
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vendor
+  cancel-in-progress: false
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 下载源码
+        run: python scripts/vendor_third_party.py ${{ inputs.force && '--force' || '' }}
+
+      - name: 提交
+        run: |
+          git add -A third_party
+          if git diff --cached --quiet; then
+            echo "没有变化"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "third_party: 更新 Scintilla/Lexilla 源码（$(tr '\n' ' ' < third_party/VERSIONS.txt | cut -c1-80)）"
+          git push
