@@ -1,0 +1,13 @@
+[package]
+name = "hn-search"
+description = "HurshNote 查找替换引擎（PCRE2，跨平台）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pcre2.workspace = true
+
+[lints]
+workspace = true

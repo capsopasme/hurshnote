@@ -12,9 +12,13 @@ repository = "https://github.com/capsopasme/hurshnote"
 [workspace.dependencies]
 hn-text = { path = "crates/hn-text" }
 hn-sci = { path = "crates/hn-sci" }
+hn-search = { path = "crates/hn-search" }
 windows-sys = "0.59"
 cc = "1"
 embed-resource = "2.5"
+encoding_rs = "0.8"
+chardetng = "0.1"
+pcre2 = "0.2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

@@ -5,13 +5,27 @@
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod commands;
+#[cfg(windows)]
+mod config;
+#[cfg(windows)]
 mod crash;
 #[cfg(windows)]
 mod dialogs;
 #[cfg(windows)]
-mod menu;
+mod dlg;
+#[cfg(windows)]
+mod docs;
+#[cfg(windows)]
+mod editops;
+#[cfg(windows)]
+mod finddlg;
+#[cfg(windows)]
+mod instance;
 #[cfg(windows)]
 mod selftest;
+#[cfg(windows)]
+mod statusbar;
 #[cfg(windows)]
 mod win;
 

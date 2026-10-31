@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// 编进程序的 Lexilla lexer 源文件（与 native/hn_lexers.cxx 中的列表保持一致）。
 const LEXERS: &[&str] = &[
+    "LexBash",
     "LexBatch",
     "LexCPP",
     "LexCSS",
@@ -72,6 +73,7 @@ fn main() {
         }
         b.file(f);
     }
+    b.file(native.join("hn_loader.cxx"));
     b.compile("scintilla");
 
     // ---- Lexilla（只编译需要的 lexer） ----

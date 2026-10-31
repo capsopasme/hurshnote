@@ -11,6 +11,7 @@ use std::ptr;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, SendMessageW};
 
+pub mod langs;
 pub mod theme;
 
 /// 从 Scintilla.h / SciLexer.h 自动生成的常量。
@@ -177,4 +178,199 @@ impl Sci {
         self.send(SCI_SETILEXER, 0, lexer as isize);
         true
     }
+
+    /// 以只读切片访问全部文本。闭包内不得再调用会修改文档的消息。
+    pub fn with_text<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        let len = self.len();
+        if len == 0 {
+            return f(&[]);
+        }
+        let p = self.send(SCI_GETCHARACTERPOINTER, 0, 0) as *const u8;
+        f(unsafe { std::slice::from_raw_parts(p, len) })
+    }
+
+    /// 取 `[start, end)` 范围文本的副本。
+    pub fn text_range(&self, start: usize, end: usize) -> Vec<u8> {
+        self.with_text(|t| {
+            let end = end.min(t.len());
+            t[start.min(end)..end].to_vec()
+        })
+    }
+
+    /// 用 `text` 替换 `[start, end)`。
+    pub fn replace_range(&self, start: usize, end: usize, text: &[u8]) {
+        self.send(SCI_SETTARGETRANGE, start, end as isize);
+        self.send(SCI_REPLACETARGET, text.len(), text.as_ptr() as isize);
+    }
+
+    /// 在一个撤销步骤内执行 `f`。
+    pub fn undo_group<R>(&self, f: impl FnOnce() -> R) -> R {
+        self.send(SCI_BEGINUNDOACTION, 0, 0);
+        let r = f();
+        self.send(SCI_ENDUNDOACTION, 0, 0);
+        r
+    }
+
+    pub fn current_pos(&self) -> usize {
+        self.send(SCI_GETCURRENTPOS, 0, 0) as usize
+    }
+
+    pub fn anchor(&self) -> usize {
+        self.send(SCI_GETANCHOR, 0, 0) as usize
+    }
+
+    pub fn selection_start(&self) -> usize {
+        self.send(SCI_GETSELECTIONSTART, 0, 0) as usize
+    }
+
+    pub fn selection_end(&self) -> usize {
+        self.send(SCI_GETSELECTIONEND, 0, 0) as usize
+    }
+
+    pub fn set_sel(&self, anchor: usize, caret: usize) {
+        self.send(SCI_SETSEL, anchor, caret as isize);
+    }
+
+    /// 选中并滚动到可见（考虑折叠）。
+    pub fn select_and_show(&self, start: usize, end: usize) {
+        let line = self.line_from_pos(start);
+        self.send(SCI_ENSUREVISIBLEENFORCEPOLICY, line, 0);
+        self.set_sel(start, end);
+        self.send(SCI_SCROLLCARET, 0, 0);
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.send(SCI_GETLINECOUNT, 0, 0) as usize
+    }
+
+    pub fn line_from_pos(&self, pos: usize) -> usize {
+        self.send(SCI_LINEFROMPOSITION, pos, 0) as usize
+    }
+
+    pub fn line_start(&self, line: usize) -> usize {
+        self.send(SCI_POSITIONFROMLINE, line, 0) as usize
+    }
+
+    /// 行尾位置（不含换行符）。
+    pub fn line_end(&self, line: usize) -> usize {
+        self.send(SCI_GETLINEENDPOSITION, line, 0) as usize
+    }
+
+    /// 某行文本（不含换行符）。
+    pub fn line_text(&self, line: usize) -> String {
+        let bytes = self.text_range(self.line_start(line), self.line_end(line));
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.send(SCI_GETREADONLY, 0, 0) != 0
+    }
+
+    // ---- 多文档 ----
+
+    /// 当前视图挂着的文档指针。
+    pub fn doc_pointer(&self) -> isize {
+        self.send(SCI_GETDOCPOINTER, 0, 0)
+    }
+
+    /// 把视图切换到另一个文档（视图会持有它的一个引用）。
+    pub fn set_doc_pointer(&self, doc: isize) {
+        self.send(SCI_SETDOCPOINTER, 0, doc);
+    }
+
+    /// 新建空文档，返回的指针引用计数为 1，由调用方负责释放。
+    pub fn create_document(&self) -> isize {
+        self.send(SCI_CREATEDOCUMENT, 0, SC_DOCUMENTOPTION_DEFAULT)
+    }
+
+    pub fn add_ref_document(&self, doc: isize) {
+        self.send(SCI_ADDREFDOCUMENT, 0, doc);
+    }
+
+    pub fn release_document(&self, doc: isize) {
+        self.send(SCI_RELEASEDOCUMENT, 0, doc);
+    }
+
+    /// 创建文档加载器（只能在 UI 线程调用）；可交给后台线程填充。
+    pub fn create_loader(&self, size_hint: usize) -> Option<Loader> {
+        let p = self.send(SCI_CREATELOADER, size_hint, SC_DOCUMENTOPTION_DEFAULT);
+        (p != 0).then_some(Loader(p as *mut c_void))
+    }
+}
+
+extern "C" {
+    fn hn_loader_add(loader: *mut c_void, data: *const c_char, length: isize) -> c_int;
+    fn hn_loader_convert(loader: *mut c_void) -> *mut c_void;
+    fn hn_loader_release(loader: *mut c_void) -> c_int;
+}
+
+/// Scintilla 文档加载器（ILoader）。可以在后台线程调用 [`Loader::add`]。
+pub struct Loader(*mut c_void);
+
+// 安全：ILoader 的设计就是在后台线程填充，之后交回 UI 线程转换。
+unsafe impl Send for Loader {}
+
+impl Loader {
+    /// 追加 UTF-8 数据。返回 false 表示内存不足等错误。
+    pub fn add(&mut self, data: &[u8]) -> bool {
+        for chunk in data.chunks(1 << 20) {
+            let st = unsafe {
+                hn_loader_add(
+                    self.0,
+                    chunk.as_ptr() as *const c_char,
+                    chunk.len() as isize,
+                )
+            };
+            if st as isize != SC_STATUS_OK {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// 转换为文档指针（引用计数 1）。只能在 UI 线程调用。
+    pub fn into_document(self) -> isize {
+        let p = self.0;
+        std::mem::forget(self);
+        unsafe { hn_loader_convert(p) as isize }
+    }
+}
+
+impl Drop for Loader {
+    fn drop(&mut self) {
+        unsafe {
+            hn_loader_release(self.0);
+        }
+    }
+}
+
+/// Scintilla 通知结构（与 Scintilla.h 中的 `SCNotification` 布局一致）。
+#[repr(C)]
+#[derive(Debug)]
+pub struct Notification {
+    pub hwnd_from: HWND,
+    pub id_from: usize,
+    pub code: u32,
+    pub position: isize,
+    pub ch: i32,
+    pub modifiers: i32,
+    pub modification_type: i32,
+    pub text: *const c_char,
+    pub length: isize,
+    pub lines_added: isize,
+    pub message: i32,
+    pub wparam: usize,
+    pub lparam: isize,
+    pub line: isize,
+    pub fold_level_now: i32,
+    pub fold_level_prev: i32,
+    pub margin: i32,
+    pub list_type: i32,
+    pub x: i32,
+    pub y: i32,
+    pub token: i32,
+    pub annotation_lines_added: isize,
+    pub updated: i32,
+    pub list_completion_method: i32,
+    pub character_source: i32,
 }

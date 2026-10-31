@@ -13,6 +13,7 @@
 
 using namespace Lexilla;
 
+extern const LexerModule lmBash;
 extern const LexerModule lmBatch;
 extern const LexerModule lmCPP;
 extern const LexerModule lmCss;
@@ -39,6 +40,7 @@ void Init() {
 		return;
 	}
 	catalogue.AddLexerModules({
+		&lmBash,
 		&lmBatch,
 		&lmCPP,
 		&lmCss,

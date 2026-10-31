@@ -95,9 +95,38 @@ pub fn detect(bytes: &[u8], default: Eol) -> Eol {
     EolStats::scan(bytes).dominant().unwrap_or(default)
 }
 
+/// 把所有换行符统一为 `eol`。
+pub fn convert(text: &str, eol: Eol) -> String {
+    let target = match eol {
+        Eol::Crlf => "\r\n",
+        Eol::Lf => "\n",
+        Eol::Cr => "\r",
+    };
+    let mut out = String::with_capacity(text.len() + text.len() / 32);
+    let mut rest = text;
+    while let Some(i) = rest.find(['\r', '\n']) {
+        out.push_str(&rest[..i]);
+        out.push_str(target);
+        let skip = if rest[i..].starts_with("\r\n") { 2 } else { 1 };
+        rest = &rest[i + skip..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn convert_all_kinds() {
+        let s = "a\r\nb\nc\rd";
+        assert_eq!(convert(s, Eol::Lf), "a\nb\nc\nd");
+        assert_eq!(convert(s, Eol::Crlf), "a\r\nb\r\nc\r\nd");
+        assert_eq!(convert(s, Eol::Cr), "a\rb\rc\rd");
+        assert_eq!(convert("", Eol::Crlf), "");
+        assert_eq!(convert("\r\n\r\n", Eol::Lf), "\n\n");
+    }
 
     #[test]
     fn counts_each_kind() {

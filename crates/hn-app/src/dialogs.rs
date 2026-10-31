@@ -30,25 +30,42 @@ fn filter() -> Vec<u16> {
     v
 }
 
-pub fn open_file(owner: HWND) -> Option<PathBuf> {
+const OFN_ALLOWMULTISELECT: u32 = 0x0000_0200;
+
+/// 打开文件对话框（可多选）。`dir` 为初始目录。
+pub fn open_files(owner: HWND, dir: Option<&Path>) -> Vec<PathBuf> {
     let filter = filter();
-    let mut buf = vec![0u16; 32 * 1024];
+    let mut buf = vec![0u16; 256 * 1024];
+    let dir_w = dir.map(wide_path);
     let mut ofn: OPENFILENAMEW = unsafe { zeroed() };
     ofn.lStructSize = size_of::<OPENFILENAMEW>() as u32;
     ofn.hwndOwner = owner;
     ofn.lpstrFilter = filter.as_ptr();
     ofn.lpstrFile = buf.as_mut_ptr();
     ofn.nMaxFile = buf.len() as u32;
+    if let Some(d) = &dir_w {
+        ofn.lpstrInitialDir = d.as_ptr();
+    }
     ofn.Flags = OFN_EXPLORER
         | OFN_FILEMUSTEXIST
         | OFN_PATHMUSTEXIST
         | OFN_HIDEREADONLY
         | OFN_NOCHANGEDIR
-        | OFN_ENABLESIZING;
-    if unsafe { GetOpenFileNameW(&mut ofn) } != 0 {
-        Some(PathBuf::from(from_wide(&buf)))
-    } else {
-        None
+        | OFN_ENABLESIZING
+        | OFN_ALLOWMULTISELECT;
+    if unsafe { GetOpenFileNameW(&mut ofn) } == 0 {
+        return Vec::new();
+    }
+    // 单选："完整路径\0\0"；多选："目录\0文件1\0文件2\0\0"
+    let parts: Vec<PathBuf> = buf
+        .split(|&c| c == 0)
+        .take_while(|s| !s.is_empty())
+        .map(|s| PathBuf::from(from_wide(s)))
+        .collect();
+    match parts.len() {
+        0 => Vec::new(),
+        1 => parts,
+        _ => parts[1..].iter().map(|f| parts[0].join(f)).collect(),
     }
 }
 
