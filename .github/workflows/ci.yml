@@ -101,21 +101,17 @@ jobs:
         shell: pwsh
         run: |
           if (-not (git ls-files Cargo.lock)) {
-            Write-Host ("::notice title=Cargo.lock::" + ((Get-Content Cargo.lock -Raw) -replace '%','%25' -replace "`r",'' -replace "`n",'%0A'))
+            # 注解长度有限，分块输出
+            $text = (Get-Content Cargo.lock -Raw) -replace "`r", ''
+            $n = [math]::Ceiling($text.Length / 3000)
+            for ($k = 0; $k -lt $n; $k++) {
+              $part = $text.Substring($k * 3000, [math]::Min(3000, $text.Length - $k * 3000))
+              Write-Host ("::notice title=Cargo.lock $($k + 1)/$n::" + ($part -replace '%','%25' -replace "`n",'%0A'))
+            }
           }
 
       - name: 发布 nightly 预发布版
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\release\hurshnote.exe dist\
-          Copy-Item LICENSE, selftest.txt dist\
-          Compress-Archive -Path dist\* -DestinationPath hurshnote-nightly-x64.zip -Force
-          gh release view nightly *> $null
-          if ($LASTEXITCODE -eq 0) { gh release delete nightly --yes --cleanup-tag }
-          $short = $env:GITHUB_SHA.Substring(0, 7)
-          $notes = "main 分支最新构建（$short），未签名，首次运行时 Windows SmartScreen 可能提示，选择“仍要运行”即可。`n`n自测结果：`n``````n$(Get-Content selftest.txt -Raw)``````"
-          gh release create nightly hurshnote-nightly-x64.zip target\release\hurshnote.exe --prerelease --title "Nightly $short" --notes $notes --target $env:GITHUB_SHA
+        run: python scripts/publish_nightly.py target/release/hurshnote.exe selftest.txt

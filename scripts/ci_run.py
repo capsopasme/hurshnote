@@ -11,8 +11,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
-TAIL_LINES = 120
-MAX_CHARS = 60000
+TAIL_LINES = 60
+MAX_CHARS = 3800  # 注解消息长度有限
 
 
 def escape(s: str) -> str:
@@ -44,10 +44,10 @@ def main() -> int:
         err_idx = [i for i, l in enumerate(lines) if l.startswith(("error", "warning: unused")) or "error[" in l or ": error" in l]
         if err_idx:
             start = max(0, err_idx[0] - 5)
-            chunk = lines[start : start + TAIL_LINES * 2]
+            chunk = lines[start : start + TAIL_LINES]
         else:
             chunk = lines[-TAIL_LINES:]
-        text = "\n".join(chunk)[-MAX_CHARS:]
+        text = "\n".join(chunk)[:MAX_CHARS]
         print(f"::error title={escape(title)} 失败（退出码 {code}）::{escape(text)}")
     return code
 
