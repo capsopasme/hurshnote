@@ -1,0 +1,16 @@
+[package]
+name = "hn-core"
+description = "HurshNote 核心数据格式：会话清单、快照、加密文档、磁盘戳（跨平台）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hn-crypto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+getrandom.workspace = true
+
+[lints]
+workspace = true

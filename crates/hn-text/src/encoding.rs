@@ -39,6 +39,32 @@ impl TextEncoding {
         }
     }
 
+    /// 持久化用的稳定标识（会话文件中保存）。
+    pub fn id(self) -> String {
+        match self {
+            TextEncoding::Utf8 => "utf-8".into(),
+            TextEncoding::Utf16Le => "utf-16le".into(),
+            TextEncoding::Utf16Be => "utf-16be".into(),
+            TextEncoding::Legacy(e) => e.name().to_string(),
+        }
+    }
+
+    /// [`TextEncoding::id`] 的逆操作。
+    pub fn from_id(id: &str) -> Option<TextEncoding> {
+        match id {
+            "utf-8" => Some(TextEncoding::Utf8),
+            "utf-16le" => Some(TextEncoding::Utf16Le),
+            "utf-16be" => Some(TextEncoding::Utf16Be),
+            other => Encoding::for_label(other.as_bytes()).map(|e| {
+                if e == encoding_rs::UTF_8 {
+                    TextEncoding::Utf8
+                } else {
+                    TextEncoding::Legacy(e)
+                }
+            }),
+        }
+    }
+
     pub fn supports_bom(self) -> bool {
         !matches!(self, TextEncoding::Legacy(_))
     }
@@ -591,6 +617,15 @@ mod tests {
             EncodingInfo::new(TextEncoding::Legacy(encoding_rs::GB18030), false).label(),
             "GB18030"
         );
+    }
+
+    #[test]
+    fn encoding_ids_roundtrip() {
+        for c in catalog() {
+            let id = c.info.encoding.id();
+            assert_eq!(TextEncoding::from_id(&id), Some(c.info.encoding), "{id}");
+        }
+        assert_eq!(TextEncoding::from_id("no-such"), None);
     }
 
     #[test]

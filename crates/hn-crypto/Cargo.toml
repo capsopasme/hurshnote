@@ -1,0 +1,16 @@
+[package]
+name = "hn-crypto"
+description = "HurshNote 加密文件格式（Argon2id + AES-256-GCM，跨平台）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+argon2.workspace = true
+aes-gcm.workspace = true
+zeroize.workspace = true
+getrandom.workspace = true
+
+[lints]
+workspace = true
