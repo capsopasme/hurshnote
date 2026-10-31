@@ -1,0 +1,86 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 跨平台 crate：格式检查、单元测试、clippy
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装工具链
+        run: rustup toolchain install || rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式检查
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy -p hn-text --all-targets -- -D warnings
+
+      - name: 测试
+        run: cargo test -p hn-text
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装工具链
+        run: rustup toolchain install || rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试
+        run: cargo test --workspace
+
+      - name: 构建 Release
+        run: cargo build --release
+
+      - name: 启动自测
+        shell: pwsh
+        run: |
+          $exe = "target\release\hurshnote.exe"
+          "exe 大小：{0:N2} MB" -f ((Get-Item $exe).Length / 1MB)
+          $times = @()
+          for ($i = 1; $i -le 5; $i++) {
+            $out = Join-Path $env:RUNNER_TEMP "selftest-$i.txt"
+            $p = Start-Process -FilePath $exe -ArgumentList '--selftest', $out -PassThru
+            if (-not $p.WaitForExit(60000)) { $p.Kill(); throw "第 $i 次自测超时" }
+            if (-not (Test-Path $out)) { throw "第 $i 次自测没有输出（退出码 $($p.ExitCode)）" }
+            $report = Get-Content $out
+            if ($i -eq 1) { $report | Write-Host; Copy-Item $out selftest.txt }
+            if (-not ($report -contains 'result=pass')) { $report | Write-Host; throw "第 $i 次自测失败" }
+            $ms = [double](($report | Where-Object { $_ -like 'startup_ms=*' }) -replace 'startup_ms=', '')
+            $times += $ms
+          }
+          $sorted = $times | Sort-Object
+          $median = $sorted[2]
+          "启动耗时（ms）：$($times -join ', ')；中位数 $median"
+          "startup_ms_median=$median" | Add-Content selftest.txt
+          if ($median -gt 150) { Write-Host "::warning::启动耗时中位数 $median ms，超过 150 ms 目标" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hurshnote-${{ github.sha }}
+          path: |
+            target/release/hurshnote.exe
+            target/release/hurshnote.pdb
+            selftest.txt
+            Cargo.lock
+          if-no-files-found: warn

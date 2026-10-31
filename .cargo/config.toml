@@ -1,0 +1,4 @@
+# CRT 静态链接：未安装 VC++ 运行库的机器也能直接运行。
+# cc crate 会据此用 /MT 编译 Scintilla/Lexilla，保持一致。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

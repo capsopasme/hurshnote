@@ -20,8 +20,10 @@
 
 ## 构建与测试
 
-- Windows：`cargo build --release`；CI 在 `windows-latest` 上构建并上传 exe。
-- Linux（云端环境）：`cargo test -p hn-text -p hn-search -p hn-crypto -p hn-large -p hn-md`；Windows 部分用 `cargo xwin check --target x86_64-pc-windows-msvc` 检查。
+- Windows：`cargo build --release`（需要 VS Build Tools 的 C++ 工具）。CI 在 `windows-latest` 上构建、运行 `hurshnote.exe --selftest <文件>` 自测并上传 exe。
+- Linux：只能测试跨平台 crate，如 `cargo test -p hn-text`。云端沙箱可能无法访问 crates.io，此时把 crate 复制到临时目录单独测试，或推送后看 CI 结果（`gh run list` / `gh run view --log-failed`）。
+- 第三方源码：`third_party/versions.toml` 指定版本，推送后 `vendor` 工作流下载并提交；本地也可运行 `python scripts/vendor_third_party.py`。
+- Win32 常量在 `hn-app/src/win.rs` 中直接写数值；Scintilla 常量由 `hn-sci/build.rs` 从头文件生成（`hn_sci::SCI_*` 等）。
 - 完成一个任务后，在 `docs/PLAN.md` 中勾选；设计有变化时同步更新 `docs/ARCHITECTURE.md`。
 
 ## 文档与提交语言

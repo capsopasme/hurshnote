@@ -1,0 +1,35 @@
+// HurshNote 资源（仅 ASCII，避免 rc.exe 编码问题）
+
+1 ICON "hurshnote.ico"
+
+// RT_MANIFEST = 24, CREATEPROCESS_MANIFEST_RESOURCE_ID = 1
+1 24 "hurshnote.exe.manifest"
+
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "capsopasme"
+            VALUE "FileDescription", "HurshNote"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "InternalName", "hurshnote"
+            VALUE "LegalCopyright", "MIT License"
+            VALUE "OriginalFilename", "hurshnote.exe"
+            VALUE "ProductName", "HurshNote"
+            VALUE "ProductVersion", "0.1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

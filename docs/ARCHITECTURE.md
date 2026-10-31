@@ -31,7 +31,7 @@ Notepad++ 的路线（原生 Win32 + Scintilla）启动快、体积小、中文�
 | 层 | 选择 | 备注 |
 |---|---|---|
 | 语言 | Rust stable，`x86_64-pc-windows-msvc`，`rust-toolchain.toml` 固定版本 | Rust 的 MSVC 目标最低要求 Win10，与 1809 底线一致 |
-| Win32 绑定 | `windows` crate（COM：DirectWrite / Direct2D / WIC / Shell）| 不引入任何 GUI 框架 |
+| Win32 绑定 | `windows-sys`（普通 Win32 API，零开销、签名稳定）；需要 COM（DirectWrite / Direct2D / WIC / Shell）时再引入 `windows` crate | 不引入任何 GUI 框架 |
 | 编辑内核 | Scintilla 5.x + Lexilla 5.x，源码放在 `third_party/`，用 `cc` crate 以 C++17 编译并**静态链接** | 静态时调用 `Scintilla_RegisterClasses`；lexer 用 `CreateLexer` + `SCI_SETILEXER` |
 | 文本渲染 | Scintilla 用 `SC_TECHNOLOGY_DIRECTWRITE`；自绘视图用 Direct2D + DirectWrite | 高 DPI、彩色 emoji、字体回退 |
 | 编码 | `encoding_rs` + `chardetng` | GB18030 往返无损 |
@@ -43,7 +43,7 @@ Notepad++ 的路线（原生 Win32 + Scintilla）启动快、体积小、中文�
 | 加密 | `argon2` + `aes-gcm` + `zeroize`，随机数来自 `getrandom`（BCryptGenRandom） | |
 | 配置 | `serde` + `toml` | |
 | 日志 | `tracing` + 滚动文件 | 默认只记录 warn 以上 |
-| 构建 | Cargo workspace；GitHub Actions `windows-latest` 产出 exe；CRT 静态链接（`+crt-static`） | 云端 Linux 容器可用 `cargo-xwin` 做交叉编译检查 |
+| 构建 | Cargo workspace；GitHub Actions `windows-latest` 产出 exe；CRT 静态链接（`+crt-static`） | 第三方 C++ 源码由 `vendor` 工作流从官网下载并提交到 `third_party/` |
 | 打包 | 便携 zip + Inno Setup（不签名） | |
 
 ## 3. Crate 划分

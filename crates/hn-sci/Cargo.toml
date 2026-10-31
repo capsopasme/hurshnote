@@ -1,0 +1,20 @@
+[package]
+name = "hn-sci"
+description = "Scintilla/Lexilla 静态编译与 Rust 封装"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+links = "scintilla"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+cc.workspace = true
+
+[lints]
+workspace = true

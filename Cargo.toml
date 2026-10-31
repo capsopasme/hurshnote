@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+repository = "https://github.com/capsopasme/hurshnote"
+
+[workspace.dependencies]
+hn-text = { path = "crates/hn-text" }
+hn-sci = { path = "crates/hn-sci" }
+windows-sys = "0.59"
+cc = "1"
+embed-resource = "2.5"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+missing_safety_doc = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = "limited"
