@@ -70,6 +70,8 @@ hurshnote/
   docs/
 ```
 
+**M1 实际的 `hn-app` 模块：** `app`（窗口、状态、命令分发）、`docs`（文档模型与加载）、`commands`（命令 ID、快捷键表、菜单）、`statusbar`、`finddlg`（查找/替换、跳转对话框）、`dlg`（内存对话框模板）、`editops`（行操作、书签、列表续写、括号匹配）、`config`（设置与最近文件）、`instance`（命令行与单实例）、`selftest`。`hn-core` 尚未拆出，M2 实现安全保存与快照时再从 `app`/`docs` 中拆分。
+
 **原则：**
 - 能不依赖 Win32 的逻辑都放在跨平台 crate 里，这样在 Linux 上也能跑单元测试、模糊测试。
 - `hn-app` 只做"把事件翻译成调用"和"把状态画出来"，不写业务逻辑。

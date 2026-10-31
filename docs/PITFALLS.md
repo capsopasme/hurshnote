@@ -28,8 +28,18 @@
 - [ ] Ctrl+滚轮默认会触发 Scintilla 自带缩放 → 拦截后走我们的小数缩放逻辑，并同步到所有视图。
 - [ ] Ctrl+点击只有在 `SCI_SETMULTIPLESELECTION(true)` 时才添加光标；Ctrl+双击、Ctrl+拖拽与 Alt+拖拽的组合行为要逐一实测，并与"Ctrl+点击打开链接"之类的功能避免冲突。
 - [ ] 中文 IME：Scintilla 已处理内联输入；不要在 `WM_IME_*` 上拦截 Scintilla 窗口的消息。
+- [ ] lexer、关键字、属性、EOL 模式、只读、代码页属于**文档**；样式、边栏、标记定义、换行模式属于**视图**。切换文档（`SCI_SETDOCPOINTER`）后必须重新应用样式，并对新文档设一次 `SC_CP_UTF8`。
+- [ ] `SCI_GETMODIFY` 只反映当前文档；非当前文档的修改状态要自己缓存（保存点通知 + 切换时记录）。
+- [ ] Scintilla 的修改历史标记占用 21–24 号、折叠占用 25–31 号，书签用 18 号。
+- [ ] 边栏宽度、光标宽度是像素值，不随 DPI 缩放，要自己乘 DPI/96。
+- [ ] Scintilla 在 `WM_CREATE` 里 `RegisterDragDrop`，需要已 `OleInitialize`；它的拖放目标不接受 CF_HDROP，初始化 OLE 后文件拖到编辑区会失效。
+- [ ] `SCN_CHARADDED` 在 CRLF 模式下按 `\r`、`\n` 各发一次，换行后的处理只在 `\n` 时做（CR 模式在 `\r`）。
 
 ## 编码
+
+- [ ] 二进制文件按 Windows-1252 解码：encoding_rs 中它对 256 个字节值一一映射（0x80–0x9F 未定义字节映射到 C1 控制字符），往返无损。
+- [ ] encoding_rs 不编码 UTF-16（WHATWG 规定输出编码为 UTF-8），UTF-16 编码要自己写。
+- [ ] encoding_rs 默认的 `encode()` 会把不可映射字符写成 `&#NNNN;`，必须用 `encode_from_utf8_without_replacement` 自己处理并计数。
 
 - [ ] 短文本 GBK 可能恰好是合法 UTF-8 → 严格 UTF-8 校验 + 允许用户手动指定，并按路径记住。
 - [ ] 解码时出现替换字符 → 标记 lossy，保存前警告，否则会静默毁坏原文件。
@@ -128,6 +138,11 @@
 - [ ] 大图片解码阻塞 UI → WIC 解码放后台，缓存缩放后的位图。
 - [ ] 相对图片路径以 Markdown 文件所在目录为基准。
 - [ ] 链接点击用 `ShellExecuteW` 打开，只允许 `http(s)`、`mailto`、本地文件，不执行 `file:` 中的可执行文件。
+
+## windows-sys
+
+- [ ] 部分函数受多个特性控制：`CreateMutexW` 还需要 `Win32_Security`；`MessageBeep` 在 `Win32_System_Diagnostics_Debug` 而不是 `WindowsAndMessaging`。编译报"找不到"时先查特性。
+- [ ] pcre2 crate 的 `disable_utf_check` 已废弃（新版 PCRE2 不再重复校验）。
 
 ## 发布
 

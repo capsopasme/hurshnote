@@ -111,6 +111,7 @@ jobs:
               Write-Host ("::notice title=Cargo.lock $($k + 1)/$n::" + ($part -replace '%','%25' -replace "`n",'%0A'))
             }
           }
+          $global:LASTEXITCODE = 0
 
       - name: 发布 nightly 预发布版
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
