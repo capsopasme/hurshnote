@@ -1763,7 +1763,7 @@ impl App {
             Outcome::Error(e) => self.report(&e),
             Outcome::NotFound => {
                 self.report(&format!("找不到“{}”", st.pattern));
-                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::MessageBeep(0) };
+                unsafe { windows_sys::Win32::System::Diagnostics::Debug::MessageBeep(0) };
             }
             Outcome::Found(a, b, wrapped) => {
                 sci.select_and_show(a, b);
