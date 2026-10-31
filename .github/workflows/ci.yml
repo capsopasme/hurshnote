@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 env:
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: never
   PYTHONUTF8: "1"
   PYTHONIOENCODING: utf-8
 
@@ -19,7 +19,7 @@ jobs:
   portable:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装工具链
         run: rustup toolchain install || rustup show
@@ -38,7 +38,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装工具链
         run: rustup toolchain install || rustup show
