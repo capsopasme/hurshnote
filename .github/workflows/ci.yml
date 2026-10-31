@@ -11,6 +11,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
 
 jobs:
   # 跨平台 crate：格式检查、单元测试、clippy
@@ -25,13 +27,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: 格式检查
-        run: cargo fmt --all --check
+        run: python3 scripts/ci_run.py 格式检查 -- cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy -p hn-text --all-targets -- -D warnings
+        run: python3 scripts/ci_run.py Clippy -- cargo clippy -p hn-text --all-targets -- -D warnings
 
       - name: 测试
-        run: cargo test -p hn-text
+        run: python3 scripts/ci_run.py 测试 -- cargo test -p hn-text
 
   windows:
     runs-on: windows-latest
@@ -44,28 +46,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: python scripts/ci_run.py Clippy -- cargo clippy --workspace --all-targets -- -D warnings
 
       - name: 测试
-        run: cargo test --workspace
+        run: python scripts/ci_run.py 测试 -- cargo test --workspace
 
       - name: 构建 Release
-        run: cargo build --release
+        run: python scripts/ci_run.py 构建 -- cargo build --release
 
       - name: 启动自测
         shell: pwsh
         run: |
+          function Fail($msg) { Write-Host "::error title=启动自测::$msg"; exit 1 }
           $exe = "target\release\hurshnote.exe"
           "exe 大小：{0:N2} MB" -f ((Get-Item $exe).Length / 1MB)
           $times = @()
           for ($i = 1; $i -le 5; $i++) {
             $out = Join-Path $env:RUNNER_TEMP "selftest-$i.txt"
             $p = Start-Process -FilePath $exe -ArgumentList '--selftest', $out -PassThru
-            if (-not $p.WaitForExit(60000)) { $p.Kill(); throw "第 $i 次自测超时" }
-            if (-not (Test-Path $out)) { throw "第 $i 次自测没有输出（退出码 $($p.ExitCode)）" }
+            if (-not $p.WaitForExit(60000)) { $p.Kill(); Fail "第 $i 次自测超时" }
+            if (-not (Test-Path $out)) { Fail "第 $i 次自测没有输出（退出码 $($p.ExitCode)）" }
             $report = Get-Content $out
             if ($i -eq 1) { $report | Write-Host; Copy-Item $out selftest.txt }
-            if (-not ($report -contains 'result=pass')) { $report | Write-Host; throw "第 $i 次自测失败" }
+            if (-not ($report -contains 'result=pass')) { Fail ("第 $i 次自测失败%0A" + ($report -join '%0A')) }
             $ms = [double](($report | Where-Object { $_ -like 'startup_ms=*' }) -replace 'startup_ms=', '')
             $times += $ms
           }
@@ -73,6 +76,8 @@ jobs:
           $median = $sorted[2]
           "启动耗时（ms）：$($times -join ', ')；中位数 $median"
           "startup_ms_median=$median" | Add-Content selftest.txt
+          $sz = "exe_mb={0:N2}" -f ((Get-Item $exe).Length / 1MB)
+          Write-Host ("::notice title=自测结果::" + ((Get-Content selftest.txt) -join '%0A') + "%0A$sz")
           if ($median -gt 150) { Write-Host "::warning::启动耗时中位数 $median ms，超过 150 ms 目标" }
 
       - uses: actions/upload-artifact@v4
