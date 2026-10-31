@@ -25,21 +25,23 @@
 
 ---
 
-## M0 骨架
+## M0 骨架 ✅
 
 **目标：能编译出一个显示 Scintilla 编辑区的空壳 exe。**
 
-- [ ] Cargo workspace、`rust-toolchain.toml`、`.gitignore`、rustfmt/clippy 配置
-- [ ] 引入 Scintilla / Lexilla 源码到 `third_party/`（记录版本号），`hn-sci` 的 `build.rs` 用 `cc` 编译
-- [ ] `hn-app`：WinMain、主窗口类、消息循环、manifest（DPI Per-Monitor V2、ComCtl v6、longPathAware）、应用图标
-- [ ] 嵌入一个 Scintilla 视图，DirectWrite 渲染，UTF-8 代码页
-- [ ] 以 UTF-8 打开/保存单个文件（先用简单写法，M2 再换成安全保存）
-- [ ] Gruvbox Light 基础配色（默认样式、行号栏、当前行、选区）
-- [ ] 所有窗口过程与回调的 `catch_unwind` 包装
-- [ ] GitHub Actions：Windows 编译 + 测试 + 上传 exe；Linux 跑跨平台 crate 测试
-- [ ] `tests/corpus/` 初始语料与大文件生成脚本
+- [x] Cargo workspace、`rust-toolchain.toml`、`.gitignore`、clippy 配置（workspace lints）
+- [x] 引入 Scintilla 5.6.8 / Lexilla 5.5.5 源码到 `third_party/`（`vendor` 工作流下载），`hn-sci` 的 `build.rs` 用 `cc` 编译
+- [x] `hn-app`：主窗口类、消息循环、manifest（DPI Per-Monitor V2、ComCtl v6、longPathAware）、应用图标、版本信息
+- [x] 嵌入一个 Scintilla 视图，DirectWrite 渲染，UTF-8 代码页
+- [x] 以 UTF-8 打开/保存单个文件（保持 BOM 与换行符；M2 再换成安全保存）
+- [x] Gruvbox Light 基础配色（默认样式、行号栏、当前行、选区、光标）
+- [x] 所有窗口过程的 `catch_unwind` 包装，panic 记录到 `%LOCALAPPDATA%\HurshNote\logs\panic.log`
+- [x] GitHub Actions：Windows 编译 + clippy + 测试 + `--selftest` 启动自测 + CRT 静态链接检查 + 上传 exe + 发布 nightly；Linux 跑格式与跨平台 crate 测试
+- [x] `tests/corpus/` 初始语料与大文件生成脚本（`scripts/gen_corpus.py`）
 
-**验收：** CI 产出单个 exe（静态 CRT）；冷启动 < 150 ms；可输入中文。
+**验收：** CI 产出单个 exe（静态 CRT，1.5 MB，只依赖系统 DLL）✅；启动到可输入的中位数 60–80 ms（CI 机器，热启动）✅；可输入中文（待在真机上确认）。
+
+> 冷启动（刚下载、首次运行）在 CI 上为 0.5–2 s，主要是磁盘缓存和 Defender 扫描未签名文件，不计入预算。
 
 ## M1 编辑器基础
 

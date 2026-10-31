@@ -2,7 +2,9 @@
 
 一个面向 Windows 的原生文本编辑器，目标是在日常编辑体验上不输 Notepad++，在大文件、数据可靠性和开发者工具上超过它。
 
-> 状态：**规划阶段**，尚无可用版本。
+> 状态：**早期开发中**（M0 骨架已完成，只能打开和保存 UTF-8 文本）。
+>
+> 最新构建：[Nightly 预发布版](https://github.com/capsopasme/hurshnote/releases/tag/nightly)（未签名，首次运行时 SmartScreen 可能拦截，点“更多信息”→“仍要运行”）。
 
 ## 主要特性（规划中）
 
@@ -28,6 +30,16 @@
 ## 系统要求
 
 Windows 10 1809 及以上，x64。
+
+## 从源码构建
+
+需要 Rust（版本见 `rust-toolchain.toml`）和 Visual Studio Build Tools（“使用 C++ 的桌面开发”）。
+
+```
+cargo build --release
+```
+
+产物为 `target\release\hurshnote.exe`，单文件，无需安装运行库。
 
 ## 许可证
 
