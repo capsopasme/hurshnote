@@ -61,6 +61,11 @@
 
 ## 快照 / 会话
 
+- [ ] 快照必须在切换离开文档**之前**写：之后就读不到那个文档的文本了（Scintilla 只能读当前文档）。
+- [ ] 删除旧快照必须排在"不再引用它的清单"写出之后，否则中途崩溃会留下引用不存在快照的清单。
+- [ ] `SCN_UPDATEUI` 的 `SC_UPDATE_CONTENT` 在样式、标记变化时也会触发；用它标记"快照过期"只会多写一次，不影响正确性。
+- [ ] 测试会话功能时用 `HURSHNOTE_DATA_DIR` 指向临时目录，不要污染真实会话。
+
 - [ ] 快照写入期间崩溃 → 先写 `.tmp` 再原子替换；清单最后写。
 - [ ] 快照恢复后磁盘文件已变化 → 比对 `disk_stamp` 提示，不要默默用旧快照覆盖。
 - [ ] 加密文档的快照必须加密。
@@ -140,6 +145,9 @@
 - [ ] 链接点击用 `ShellExecuteW` 打开，只允许 `http(s)`、`mailto`、本地文件，不执行 `file:` 中的可执行文件。
 
 ## windows-sys
+
+- [ ] `SHELLEXECUTEINFOW` 需要 `Win32_System_Registry` 特性（字段含 HKEY）；`CreateFileW` 需要 `Win32_Security`。
+- [ ] `SetUnhandledExceptionFilter` 与 `MiniDumpWriteDump` 的类型牵涉大量特性，直接自己声明（kernel32 链接 + dbghelp 动态加载）更省事。
 
 - [ ] 部分函数受多个特性控制：`CreateMutexW` 还需要 `Win32_Security`；`MessageBeep` 在 `Win32_System_Diagnostics_Debug` 而不是 `WindowsAndMessaging`。编译报"找不到"时先查特性。
 - [ ] pcre2 crate 的 `disable_utf_check` 已废弃（新版 PCRE2 不再重复校验）。

@@ -132,9 +132,9 @@ jobs:
           if ($changed -or -not (git ls-files Cargo.lock)) {
             # 注解长度有限，分块输出
             $text = (Get-Content Cargo.lock -Raw) -replace "`r", ''
-            $n = [math]::Ceiling($text.Length / 3000)
+            $n = [math]::Ceiling($text.Length / 4000)
             for ($k = 0; $k -lt $n; $k++) {
-              $part = $text.Substring($k * 3000, [math]::Min(3000, $text.Length - $k * 3000))
+              $part = $text.Substring($k * 4000, [math]::Min(4000, $text.Length - $k * 4000))
               Write-Host ("::notice title=Cargo.lock $($k + 1)/$n::" + ($part -replace '%','%25' -replace "`n",'%0A'))
             }
           }
