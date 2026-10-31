@@ -11,6 +11,8 @@ mod config;
 #[cfg(windows)]
 mod crash;
 #[cfg(windows)]
+mod crashdump;
+#[cfg(windows)]
 mod dialogs;
 #[cfg(windows)]
 mod dlg;
@@ -21,11 +23,17 @@ mod editops;
 #[cfg(windows)]
 mod finddlg;
 #[cfg(windows)]
+mod fsio;
+#[cfg(windows)]
 mod instance;
+#[cfg(windows)]
+mod pwdlg;
 #[cfg(windows)]
 mod selftest;
 #[cfg(windows)]
 mod statusbar;
+#[cfg(windows)]
+mod watcher;
 #[cfg(windows)]
 mod win;
 

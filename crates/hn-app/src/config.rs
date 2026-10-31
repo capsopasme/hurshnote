@@ -15,6 +15,10 @@ pub struct Settings {
     pub indent_guides: bool,
     pub line_numbers: bool,
     pub list_continue: bool,
+    /// 会话快照：关闭时不询问保存，重启后恢复未保存的修改
+    pub snapshots: bool,
+    /// 未修改的文档被外部修改时自动重新载入
+    pub auto_reload: bool,
     /// 缩放百分比
     pub zoom: u32,
     pub font_face: String,
@@ -34,6 +38,8 @@ impl Default for Settings {
             indent_guides: true,
             line_numbers: true,
             list_continue: true,
+            snapshots: true,
+            auto_reload: true,
             zoom: 100,
             font_face: "Consolas".into(),
             font_size_x100: 1100,
@@ -47,6 +53,10 @@ pub const ZOOM_MIN: u32 = 30;
 pub const ZOOM_MAX: u32 = 500;
 
 pub fn data_dir() -> PathBuf {
+    // 测试用：指定独立的数据目录
+    if let Some(d) = std::env::var_os("HURSHNOTE_DATA_DIR") {
+        return PathBuf::from(d);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if dir.join("portable.flag").exists() {
@@ -60,15 +70,7 @@ pub fn data_dir() -> PathBuf {
         .join("HurshNote")
 }
 
-/// 先写临时文件再改名替换，避免写到一半时崩溃损坏配置。
-fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)
-}
+use hn_core::atomic::write_atomic;
 
 fn parse_bool(v: &str) -> Option<bool> {
     match v {
@@ -95,6 +97,8 @@ pub fn load_settings() -> Settings {
             "indent_guides" => s.indent_guides = parse_bool(v).unwrap_or(s.indent_guides),
             "line_numbers" => s.line_numbers = parse_bool(v).unwrap_or(s.line_numbers),
             "list_continue" => s.list_continue = parse_bool(v).unwrap_or(s.list_continue),
+            "snapshots" => s.snapshots = parse_bool(v).unwrap_or(s.snapshots),
+            "auto_reload" => s.auto_reload = parse_bool(v).unwrap_or(s.auto_reload),
             "zoom" => {
                 if let Ok(z) = v.parse::<u32>() {
                     s.zoom = z.clamp(ZOOM_MIN, ZOOM_MAX);
@@ -134,6 +138,11 @@ pub fn save_settings(s: &Settings) {
         s.font_size_x100,
         b(s.maximized),
     );
+    out.push_str(&format!(
+        "snapshots={}\nauto_reload={}\n",
+        b(s.snapshots),
+        b(s.auto_reload)
+    ));
     if let Some((l, t, r, bm)) = s.window {
         out.push_str(&format!("window={l},{t},{r},{bm}\n"));
     }

@@ -27,10 +27,17 @@ pub struct Args {
     pub col: Option<usize>,
     pub read_only: bool,
     pub multi_inst: bool,
+    /// 不恢复会话
+    pub no_session: bool,
     pub selftest: Option<PathBuf>,
+    /// 会话强杀测试：(阶段 write/check, 标记文本, 输出文件)
+    pub session_test: Option<(String, String, PathBuf)>,
+    /// 提权保存：(临时文件, 目标)
+    pub elevated_save: Option<(PathBuf, PathBuf)>,
 }
 
-/// 解析参数。支持：`文件...`、`-n<行>`、`-c<列>`、`-ro`、`-multiInst`、`--selftest <输出>`。
+/// 解析参数。支持：`文件...`、`-n<行>`、`-c<列>`、`-ro`、`-multiInst`、`-nosession`、
+/// `--selftest <输出>`、`--selftest-session <阶段> <标记> <输出>`、`--elevated-save <临时文件> <目标>`。
 pub fn parse(args: Vec<OsString>, cwd: &Path) -> Args {
     let mut a = Args::default();
     let mut it = args.into_iter();
@@ -39,6 +46,25 @@ pub fn parse(args: Vec<OsString>, cwd: &Path) -> Args {
         if s == "--selftest" {
             a.selftest = it.next().map(PathBuf::from);
             a.multi_inst = true;
+        } else if s == "--selftest-session" {
+            let phase = it
+                .next()
+                .map(|x| x.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let marker = it
+                .next()
+                .map(|x| x.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let out = it.next().map(PathBuf::from).unwrap_or_default();
+            a.session_test = Some((phase, marker, out));
+            a.multi_inst = true;
+        } else if s == "--elevated-save" {
+            if let (Some(t), Some(d)) = (it.next(), it.next()) {
+                a.elevated_save = Some((PathBuf::from(t), PathBuf::from(d)));
+            }
+            a.multi_inst = true;
+        } else if s.eq_ignore_ascii_case("-nosession") {
+            a.no_session = true;
         } else if let Some(v) = s
             .strip_prefix("-n")
             .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))

@@ -50,12 +50,26 @@ use crate::instance::{self, Args};
 use crate::statusbar::{self, *};
 use crate::win::*;
 
+#[path = "files.rs"]
+mod files;
+#[path = "persist.rs"]
+mod persist;
+
+use crate::crashdump::{self, RunMarker};
+use crate::watcher::{Event as FsEvent, Watcher};
+use hn_core::snapshot::Store;
+use persist::{SnapJob, TIMER_SESSION, TIMER_SESSIONTEST, TIMER_SNAPSHOT};
+
 pub const CLASS_NAME: &str = "HurshNoteMain";
 const ID_EDITOR: usize = 100;
 const ID_STATUS: usize = 101;
 const WM_APP_SELFTEST: u32 = WM_APP + 1;
 const WM_APP_LOADED: u32 = WM_APP + 2;
 const WM_APP_REFRESH: u32 = WM_APP + 3;
+const WM_APP_FILES: u32 = WM_APP + 4;
+const WM_APP_SESSIONTEST: u32 = WM_APP + 5;
+const WM_QUERYENDSESSION: u32 = 0x0011;
+const WM_ENDSESSION: u32 = 0x0016;
 const TIMER_MESSAGE: usize = 1;
 const MF_BYPOSITION: u32 = 0x0400;
 const MF_CHECKED: u32 = 0x0008;
@@ -85,6 +99,20 @@ pub struct App {
     /// 其他实例转发来、等待处理的命令行参数
     pending_args: RefCell<Vec<Args>>,
     selftest_out: Option<PathBuf>,
+    session_test: Option<(String, String, PathBuf)>,
+    // ---- 快照与会话 ----
+    store: Store,
+    snap_tx: Sender<SnapJob>,
+    snap_armed: Cell<bool>,
+    snap_first: Cell<u64>,
+    /// 等会话清单写出后再删除的快照
+    to_remove: RefCell<Vec<String>>,
+    // ---- 文件监控 ----
+    watcher: RefCell<Option<Watcher>>,
+    fs_tx: Sender<FsEvent>,
+    fs_rx: Receiver<FsEvent>,
+    pending_fs: RefCell<Vec<FsEvent>>,
+    marker: RefCell<Option<RunMarker>>,
 }
 
 thread_local! {
@@ -101,6 +129,11 @@ pub fn run() -> i32 {
     let raw_args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let cwd = std::env::current_dir().unwrap_or_default();
     let args = instance::parse(raw_args.clone(), &cwd);
+
+    if let Some((tmp, target)) = &args.elevated_save {
+        return crate::fsio::run_elevated_helper(tmp, target);
+    }
+    crashdump::install();
 
     if !args.multi_inst && instance::forward_to_running(CLASS_NAME, &raw_args) {
         return 0;
@@ -140,7 +173,16 @@ pub fn run() -> i32 {
         }
 
         let (tx, rx) = channel();
+        let (fs_tx, fs_rx) = channel();
         let settings = config::load_settings();
+        let store = Store::new(config::data_dir().join("snapshots"));
+        let snap_tx = persist::start_writer(store.clone());
+        let (marker, crashed) = if args.selftest.is_none() {
+            let (m, c) = RunMarker::acquire(&config::data_dir());
+            (Some(m), c)
+        } else {
+            (None, false)
+        };
         let app = Rc::new(App {
             hinstance,
             hwnd: Cell::new(null_mut()),
@@ -166,6 +208,17 @@ pub fn run() -> i32 {
             dpi: Cell::new(96),
             pending_args: RefCell::new(Vec::new()),
             selftest_out: args.selftest.clone(),
+            session_test: args.session_test.clone(),
+            store,
+            snap_tx,
+            snap_armed: Cell::new(false),
+            snap_first: Cell::new(0),
+            to_remove: RefCell::new(Vec::new()),
+            watcher: RefCell::new(None),
+            fs_tx,
+            fs_rx,
+            pending_fs: RefCell::new(Vec::new()),
+            marker: RefCell::new(marker),
         });
         APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -191,8 +244,14 @@ pub fn run() -> i32 {
             return 1;
         }
 
+        if app.snapshots_enabled() && !args.no_session {
+            app.restore_session();
+        }
         app.open_from_args(&args);
         app.refresh();
+        if crashed && app.session_test.is_none() {
+            app.show_message("上次 HurshNote 没有正常退出，已从快照恢复未保存的内容");
+        }
 
         let mut show = SW_SHOWDEFAULT;
         if app.selftest_out.is_none() {
@@ -220,6 +279,9 @@ pub fn run() -> i32 {
         if app.selftest_out.is_some() {
             PostMessageW(hwnd, WM_APP_SELFTEST, 0, 0);
         }
+        if app.session_test.is_some() {
+            PostMessageW(hwnd, WM_APP_SESSIONTEST, 0, 0);
+        }
 
         let accel = build_accelerators();
         let mut msg: MSG = std::mem::zeroed();
@@ -235,6 +297,9 @@ pub fn run() -> i32 {
             DispatchMessageW(&msg);
         }
         DestroyAcceleratorTable(accel);
+        if let Some(m) = app.marker.borrow().as_ref() {
+            m.release();
+        }
 
         APP.with(|a| *a.borrow_mut() = None);
         hn_sci::release_resources();
@@ -345,11 +410,45 @@ impl App {
                 Some(1)
             }
             WM_TIMER => {
-                if wp == TIMER_MESSAGE {
-                    unsafe { KillTimer(hwnd, TIMER_MESSAGE) };
-                    self.message.borrow_mut().clear();
-                    self.update_status();
+                match wp {
+                    TIMER_MESSAGE => {
+                        unsafe { KillTimer(hwnd, TIMER_MESSAGE) };
+                        self.message.borrow_mut().clear();
+                        self.update_status();
+                    }
+                    TIMER_SNAPSHOT | TIMER_SESSION => self.on_persist_timer(wp),
+                    TIMER_SESSIONTEST => self.session_test_ready(),
+                    _ => {}
                 }
+                Some(0)
+            }
+            WM_ACTIVATE => {
+                // 回到前台时处理期间积累的外部修改
+                if loword(wp) != 0 && !self.pending_fs.borrow().is_empty() {
+                    unsafe { PostMessageW(hwnd, WM_APP_FILES, 0, 0) };
+                }
+                None
+            }
+            WM_APP_FILES => {
+                self.on_fs_events();
+                Some(0)
+            }
+            WM_QUERYENDSESSION => {
+                // 注销/关机：立即保存快照
+                self.flush_persist();
+                Some(1)
+            }
+            WM_ENDSESSION => {
+                if wp != 0 {
+                    self.flush_persist();
+                    if let Some(m) = self.marker.borrow().as_ref() {
+                        m.release();
+                    }
+                }
+                Some(0)
+            }
+            WM_APP_SESSIONTEST => {
+                self.session_test_start();
                 Some(0)
             }
             WM_DPICHANGED => {
@@ -374,7 +473,14 @@ impl App {
                 Some(0)
             }
             WM_CLOSE => {
-                if self.confirm_close_all() {
+                // 快照模式：不询问，保留未保存内容，下次启动恢复
+                let ok = if self.snapshots_enabled() {
+                    self.flush_persist();
+                    true
+                } else {
+                    self.confirm_close_all()
+                };
+                if ok {
                     self.save_window_state();
                     unsafe { DestroyWindow(hwnd) };
                 }
@@ -425,22 +531,11 @@ impl App {
         let ptr = sci.doc_pointer();
         sci.add_ref_document(ptr);
         let id = self.alloc_id();
-        let seq = self.next_untitled();
-        self.docs.borrow_mut().push(Doc {
-            id,
-            ptr,
-            path: None,
-            untitled: seq,
-            enc: EncodingInfo::UTF8,
-            lossy: false,
-            binary: false,
-            meta_dirty: false,
-            modified: false,
-            lang: 0,
-            long_lines: false,
-            view: ViewState::default(),
-        });
+        let mut d = Doc::new(id, ptr);
+        d.untitled = self.next_untitled();
+        self.docs.borrow_mut().push(d);
         self.active.set(id);
+        *self.watcher.borrow_mut() = Some(Watcher::start(hwnd, WM_APP_FILES, self.fs_tx.clone()));
         sci.send(SCI_SETCODEPAGE, SC_CP_UTF8 as usize, 0);
         sci.send(SCI_SETEOLMODE, SC_EOL_CRLF as usize, 0);
         theme::set_language(&sci, LANGS[0].id, LANGS[0].lexer);
@@ -532,24 +627,43 @@ impl App {
         if cur == id {
             return;
         }
+        // 会话中尚未载入的文档：现在载入
+        if self.with_doc(id, |d| d.ptr == 0) == Some(true) && !self.load_pending(id) {
+            return;
+        }
         let Some((ptr, view)) = self.with_doc(id, |d| (d.ptr, d.view)) else {
             return;
         };
+        // 离开当前文档：写快照、记录状态（这些只能对当前文档读取）
+        self.snapshot_active();
         let state = Self::capture_view(&sci);
         let modified = sci.is_modified();
+        let (bookmarks, folds) = persist::capture_marks(&sci);
+        let eol = editops::eol_of(&sci);
+        let ro = sci.is_read_only();
         self.with_doc_mut(cur, |d| {
             d.view = state;
             d.modified = modified;
+            d.bookmarks = bookmarks;
+            d.folds = folds;
+            d.eol = eol;
+            d.read_only = ro;
         });
 
         sci.set_doc_pointer(ptr);
         self.active.set(id);
         sci.send(SCI_SETCODEPAGE, SC_CP_UTF8 as usize, 0);
-        self.apply_doc_view();
-        sci.set_sel(view.anchor, view.caret);
-        sci.send(SCI_SETFIRSTVISIBLELINE, view.first_line, 0);
-        sci.send(SCI_SETXOFFSET, view.x_offset as usize, 0);
+        match self.with_doc_mut(id, |d| d.init.take()).flatten() {
+            Some(init) => self.apply_init(&sci, id, init),
+            None => {
+                self.apply_doc_view();
+                sci.set_sel(view.anchor, view.caret);
+                sci.send(SCI_SETFIRSTVISIBLELINE, view.first_line, 0);
+                sci.send(SCI_SETXOFFSET, view.x_offset as usize, 0);
+            }
+        }
         self.refresh();
+        self.arm_session_timer();
     }
 
     /// 按当前文档与设置应用视图：样式、换行、空白显示、行号等。
@@ -599,21 +713,9 @@ impl App {
         let Some(sci) = self.sci() else { return 0 };
         let ptr = sci.create_document();
         let id = self.alloc_id();
-        let seq = self.next_untitled();
-        self.docs.borrow_mut().push(Doc {
-            id,
-            ptr,
-            path: None,
-            untitled: seq,
-            enc: EncodingInfo::UTF8,
-            lossy: false,
-            binary: false,
-            meta_dirty: false,
-            modified: false,
-            lang: 0,
-            long_lines: false,
-            view: ViewState::default(),
-        });
+        let mut d = Doc::new(id, ptr);
+        d.untitled = self.next_untitled();
+        self.docs.borrow_mut().push(d);
         self.activate(id);
         sci.send(SCI_SETEOLMODE, SC_EOL_CRLF as usize, 0);
         theme::set_language(&sci, LANGS[0].id, LANGS[0].lexer);
@@ -674,6 +776,10 @@ impl App {
                 return;
             }
         };
+        if docs::is_encrypted_file(&path) {
+            self.open_encrypted(&path, goto, read_only);
+            return;
+        }
         let Some(loader) = sci.create_loader(size as usize) else {
             dialogs::error_box(self.hwnd(), "内存不足，无法打开文件。");
             return;
@@ -748,20 +854,12 @@ impl App {
             None => {
                 let pristine = self.pristine_untitled();
                 let id = self.alloc_id();
-                self.docs.borrow_mut().push(Doc {
-                    id,
-                    ptr: new_ptr,
-                    path: Some(job.path.clone()),
-                    untitled: 0,
-                    enc: t.info,
-                    lossy: t.lossy,
-                    binary: t.binary,
-                    meta_dirty: false,
-                    modified: false,
-                    lang: lang_idx,
-                    long_lines: t.long_lines,
-                    view: ViewState::default(),
-                });
+                let mut d = Doc::new(id, new_ptr);
+                d.path = Some(job.path.clone());
+                d.enc = t.info;
+                d.lang = lang_idx;
+                d.long_lines = t.long_lines;
+                self.docs.borrow_mut().push(d);
                 self.activate(id);
                 if let Some(p) = pristine {
                     self.close_doc_unchecked(p);
@@ -778,7 +876,10 @@ impl App {
             d.lang = lang_idx;
             d.meta_dirty = false;
             d.modified = false;
+            d.missing = false;
+            d.disk = Some(t.disk);
         });
+        self.watch(id, &job.path);
         let eol_mode = match t.eol {
             Eol::Crlf => SC_EOL_CRLF,
             Eol::Lf => SC_EOL_LF,
@@ -799,11 +900,10 @@ impl App {
             editops::goto_line_col(&sci, l, c);
         }
 
-        {
-            let mut r = self.recent.borrow_mut();
-            config::push_recent(&mut r, &job.path);
-            config::save_recent(&r);
-        }
+        self.add_recent(&job.path);
+        // 重新载入后文档与磁盘一致：清理快照
+        self.snapshot_active();
+        self.arm_session_timer();
 
         let mut notes = Vec::new();
         if t.binary {
@@ -878,11 +978,18 @@ impl App {
                 self.activate(next);
             }
         }
-        let ptr = self.with_doc(id, |d| d.ptr);
+        let (ptr, snap) = self
+            .with_doc(id, |d| (d.ptr, d.snapshot.clone()))
+            .unwrap_or((0, None));
         self.docs.borrow_mut().retain(|d| d.id != id);
-        if let Some(p) = ptr {
-            sci.release_document(p);
+        self.unwatch(id);
+        if ptr != 0 {
+            sci.release_document(ptr);
         }
+        if let Some(s) = snap {
+            self.to_remove.borrow_mut().push(s);
+        }
+        self.arm_session_timer();
         self.refresh();
     }
 
@@ -967,61 +1074,6 @@ impl App {
         self.activate(cur);
     }
 
-    /// 写入磁盘。M2 替换为安全保存流程（临时文件 + ReplaceFileW）。
-    fn write_active(&self, path: &Path) -> bool {
-        let Some(sci) = self.sci() else { return false };
-        let hwnd = self.hwnd();
-        let Some((mut enc, lossy)) = self.active_doc(|d| (d.enc, d.lossy)) else {
-            return false;
-        };
-        if lossy {
-            let msg = format!(
-                "这个文件按 {} 打开时有无法识别的字节，已显示为 �。\n保存后这些字节会被永久替换。\n\n仍然保存吗？",
-                enc.label()
-            );
-            if dialogs::ask_yes_no_cancel(hwnd, &msg) != Answer::Yes {
-                return false;
-            }
-        }
-        let bytes = sci.bytes();
-        let text = String::from_utf8_lossy(&bytes);
-        let mut out = encoding::encode(&text, enc);
-        if out.unmappable > 0 {
-            let msg = format!(
-                "有 {} 个字符无法用 {} 表示，按此编码保存会变成“?”。\n\n是：改用 UTF-8 保存\n否：仍按 {} 保存\n取消：不保存",
-                out.unmappable,
-                enc.label(),
-                enc.label()
-            );
-            match dialogs::ask_yes_no_cancel(hwnd, &msg) {
-                Answer::Yes => {
-                    enc = EncodingInfo::UTF8;
-                    out = encoding::encode(&text, enc);
-                }
-                Answer::No => {}
-                Answer::Cancel => return false,
-            }
-        }
-        if let Err(e) = std::fs::write(path, &out.bytes) {
-            dialogs::error_box(hwnd, &format!("无法保存 {}\n\n{e}", path.display()));
-            return false;
-        }
-        sci.set_save_point();
-        self.active_doc_mut(|d| {
-            d.enc = enc;
-            d.lossy = false;
-            d.meta_dirty = false;
-            d.modified = false;
-        });
-        {
-            let mut r = self.recent.borrow_mut();
-            config::push_recent(&mut r, path);
-            config::save_recent(&r);
-        }
-        self.refresh();
-        true
-    }
-
     // ---- 编码 / 语言 / 换行符 ----
 
     fn reopen_with_encoding(&self, idx: usize) {
@@ -1029,6 +1081,10 @@ impl App {
             return;
         };
         let id = self.active.get();
+        if self.active_doc(|d| d.is_encrypted()) == Some(true) {
+            self.show_message("加密文档始终使用 UTF-8，不能更改编码");
+            return;
+        }
         let Some(path) = self.active_doc(|d| d.path.clone()).flatten() else {
             self.show_message("未保存的文档不能重新打开，可以使用“转换为”");
             return;
@@ -1199,6 +1255,28 @@ impl App {
             IDM_FILE_EXIT => unsafe {
                 PostMessageW(self.hwnd(), WM_CLOSE, 0, 0);
             },
+            IDM_FILE_SAVE_ENCRYPTED => {
+                self.save_encrypted_as();
+            }
+            IDM_SET_SNAPSHOTS => {
+                self.toggle_setting(|s| s.snapshots = !s.snapshots);
+                if self.snapshots_enabled() {
+                    self.mark_changed();
+                } else {
+                    // 关闭快照：删除已有快照与会话
+                    let names: Vec<String> = self
+                        .docs
+                        .borrow_mut()
+                        .iter_mut()
+                        .filter_map(|d| d.snapshot.take())
+                        .collect();
+                    for n in names {
+                        self.store.remove(&n);
+                    }
+                    let _ = std::fs::remove_file(persist::session_path());
+                }
+            }
+            IDM_SET_AUTO_RELOAD => self.toggle_setting(|s| s.auto_reload = !s.auto_reload),
             IDM_RECENT_CLEAR => {
                 self.recent.borrow_mut().clear();
                 config::save_recent(&[]);
@@ -1417,6 +1495,7 @@ impl App {
                         d.modified = modified;
                     }
                 }
+                self.arm_snapshot_timer();
                 self.request_refresh();
             }
             SCN_UPDATEUI => {
@@ -1428,6 +1507,7 @@ impl App {
                         .map(|s| s.line_numbers)
                         .unwrap_or(true);
                     theme::update_line_number_width(sci, show);
+                    self.mark_changed();
                 }
                 self.update_status();
             }
@@ -1472,6 +1552,8 @@ impl App {
         check(IDM_VIEW_INDENT_GUIDES, s.indent_guides);
         check(IDM_VIEW_LINE_NUMBERS, s.line_numbers);
         check(IDM_EDIT_LIST_CONTINUE, s.list_continue);
+        check(IDM_SET_SNAPSHOTS, s.snapshots);
+        check(IDM_SET_AUTO_RELOAD, s.auto_reload);
         check(IDM_EDIT_READ_ONLY, sci.is_read_only());
         let eol = editops::eol_of(&sci);
         check(IDM_EOL_CRLF, eol == Eol::Crlf);
@@ -1845,15 +1927,18 @@ impl App {
 
     fn update_title(&self) {
         let id = self.active.get();
-        let Some((title, path)) = self.active_doc(|d| (d.title(), d.path.clone())) else {
+        let Some((title, path, missing)) =
+            self.active_doc(|d| (d.title(), d.path.clone(), d.missing))
+        else {
             return;
         };
         let dirty = self.is_dirty(id);
         let ro = self.sci().is_some_and(|s| s.is_read_only());
         let text = format!(
-            "{}{}{} - HurshNote",
+            "{}{}{}{} - HurshNote",
             if dirty { "*" } else { "" },
             path.map(|p| p.display().to_string()).unwrap_or(title),
+            if missing { " [磁盘上已删除]" } else { "" },
             if ro { " [只读]" } else { "" }
         );
         let w = wide(&text);
@@ -1872,13 +1957,14 @@ impl App {
         let Some(doc) = docs.iter().find(|d| d.id == self.active.get()) else {
             return;
         };
-        let (lang, enc, lossy, binary, long_lines, meta_dirty) = (
+        let (lang, enc, lossy, binary, long_lines, meta_dirty, encrypted) = (
             doc.lang,
             doc.enc,
             doc.lossy,
             doc.binary,
             doc.long_lines,
             doc.meta_dirty,
+            doc.key.is_some(),
         );
         drop(docs);
 
@@ -1910,6 +1996,9 @@ impl App {
 
         let msg = self.message.borrow().clone();
         let mut flags = Vec::new();
+        if encrypted {
+            flags.push("已加密");
+        }
         if binary {
             flags.push("二进制");
         }
@@ -2010,6 +2099,26 @@ impl App {
     }
     pub(crate) fn st_command(&self, id: u16) {
         self.command(id);
+    }
+    pub(crate) fn st_write_active(&self, path: &Path) -> bool {
+        let ok = self.write_active(path);
+        if ok {
+            self.active_doc_mut(|d| d.path = Some(path.to_path_buf()));
+        }
+        ok
+    }
+    pub(crate) fn st_install_encrypted(
+        &self,
+        path: &Path,
+        key: hn_crypto::Key,
+        payload: hn_core::payload::Payload,
+        stamp: hn_core::stamp::DiskStamp,
+    ) -> bool {
+        self.install_encrypted(path, key, payload, stamp, None, false)
+            .is_some()
+    }
+    pub(crate) fn st_active_encrypted(&self) -> bool {
+        self.active_doc(|d| d.is_encrypted()).unwrap_or(false)
     }
 }
 

@@ -5,6 +5,10 @@
 
 use std::path::{Path, PathBuf};
 
+use std::os::windows::fs::MetadataExt;
+
+use hn_core::session::SessionDoc;
+use hn_core::stamp::DiskStamp;
 use hn_sci::Loader;
 use hn_text::encoding::{self, DetectHints, EncodingInfo, TextEncoding};
 use hn_text::eol::{self, Eol};
@@ -45,9 +49,72 @@ pub struct Doc {
     pub lang: usize,
     pub long_lines: bool,
     pub view: ViewState,
+    /// 当前快照文件名（有未保存内容时）
+    pub snapshot: Option<String>,
+    /// 自上次快照以来内容有变化
+    pub snap_stale: bool,
+    /// 载入/保存时的磁盘状态
+    pub disk: Option<DiskStamp>,
+    /// 加密文档的密钥（内存中，释放时清零）
+    pub key: Option<hn_crypto::Key>,
+    /// 磁盘上已被删除
+    pub missing: bool,
+    /// 会话恢复时尚未载入（懒加载）的文档状态；载入后为 None
+    pub pending: Option<SessionDoc>,
+    /// 刚载入、挂到视图后需要完成的初始化
+    pub init: Option<DocInit>,
+    /// 非当前文档的书签行与折叠行（切换时记录）
+    pub bookmarks: Vec<usize>,
+    pub folds: Vec<usize>,
+    /// 非当前文档的换行符与只读状态（切换时记录）
+    pub eol: Eol,
+    pub read_only: bool,
+}
+
+/// 文档挂到视图后需要设置的属性（这些属性只能对当前文档设置）。
+#[derive(Debug, Clone, Default)]
+pub struct DocInit {
+    pub eol: Option<Eol>,
+    pub read_only: bool,
+    pub bookmarks: Vec<usize>,
+    pub folds: Vec<usize>,
+    pub view: Option<ViewState>,
 }
 
 impl Doc {
+    /// 新的空文档条目。
+    pub fn new(id: u32, ptr: isize) -> Doc {
+        Doc {
+            id,
+            ptr,
+            path: None,
+            untitled: 0,
+            enc: EncodingInfo::UTF8,
+            lossy: false,
+            binary: false,
+            meta_dirty: false,
+            modified: false,
+            lang: 0,
+            long_lines: false,
+            view: ViewState::default(),
+            snapshot: None,
+            snap_stale: false,
+            disk: None,
+            key: None,
+            missing: false,
+            pending: None,
+            init: None,
+            bookmarks: Vec::new(),
+            folds: Vec::new(),
+            eol: Eol::Crlf,
+            read_only: false,
+        }
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.key.is_some()
+    }
+
     pub fn title(&self) -> String {
         match &self.path {
             Some(p) => p
@@ -86,6 +153,7 @@ pub struct LoadedText {
     pub long_lines: bool,
     /// 文件开头一段文本，用于识别语言。
     pub head: String,
+    pub disk: DiskStamp,
 }
 
 pub struct Loaded {
@@ -97,6 +165,10 @@ pub struct Loaded {
 pub fn load(job: LoadJob, mut loader: Loader, hints: DetectHints) -> Loaded {
     let result = (|| {
         let bytes = std::fs::read(&job.path).map_err(|e| e.to_string())?;
+        let mtime = std::fs::metadata(&job.path)
+            .map(|m| m.last_write_time())
+            .unwrap_or(0);
+        let disk = DiskStamp::new(mtime, &bytes);
         let dec = match job.forced {
             Some(enc) => encoding::decode_as(&bytes, enc),
             None => encoding::decode_auto(&bytes, &hints),
@@ -119,6 +191,7 @@ pub fn load(job: LoadJob, mut loader: Loader, hints: DetectHints) -> Loaded {
             mixed_eol: stats.is_mixed(),
             long_lines,
             head,
+            disk,
         })
     })();
     Loaded { job, result }
@@ -145,4 +218,38 @@ pub fn check_size(path: &Path) -> Result<u64, String> {
         return Err("文件超过 256 MB，大文件视图尚未实现".into());
     }
     Ok(m.len())
+}
+
+/// 文件是否为 HurshNote 加密文件（只读前 8 字节）。
+pub fn is_encrypted_file(path: &Path) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 8];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .map(|_| hn_crypto::is_encrypted(&buf))
+        .unwrap_or(false)
+}
+
+/// 当前磁盘状态：读取全部内容计算哈希。
+pub fn disk_stamp(path: &Path) -> Option<DiskStamp> {
+    let bytes = std::fs::read(path).ok()?;
+    let mtime = std::fs::metadata(path).ok()?.last_write_time();
+    Some(DiskStamp::new(mtime, &bytes))
+}
+
+pub fn eol_from_str(s: &str) -> Option<Eol> {
+    match s {
+        "crlf" => Some(Eol::Crlf),
+        "lf" => Some(Eol::Lf),
+        "cr" => Some(Eol::Cr),
+        _ => None,
+    }
+}
+
+pub fn eol_to_str(e: Eol) -> &'static str {
+    match e {
+        Eol::Crlf => "crlf",
+        Eol::Lf => "lf",
+        Eol::Cr => "cr",
+    }
 }

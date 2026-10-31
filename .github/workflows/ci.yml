@@ -85,6 +85,33 @@ jobs:
           Write-Host ("::notice title=自测结果::" + ((Get-Content selftest.txt) -join '%0A') + "%0A$sz")
           if ($median -gt 150) { Write-Host "::warning::启动耗时中位数 $median ms，超过 150 ms 目标" }
 
+      - name: 会话强杀测试
+        shell: pwsh
+        run: |
+          function Fail($msg) { Write-Host "::error title=会话强杀测试::$msg"; exit 1 }
+          $exe = (Resolve-Path "target\release\hurshnote.exe").Path
+          $env:HURSHNOTE_DATA_DIR = Join-Path $env:RUNNER_TEMP "hn-data"
+          Remove-Item -Recurse -Force $env:HURSHNOTE_DATA_DIR -ErrorAction SilentlyContinue
+          $n = 20
+          $pass = 0
+          for ($i = 1; $i -le $n; $i++) {
+            $marker = "KILLTEST-$i-" + [guid]::NewGuid().ToString("N")
+            $ready = Join-Path $env:RUNNER_TEMP "ready-$i.txt"
+            $p = Start-Process -FilePath $exe -ArgumentList '--selftest-session', 'write', $marker, $ready -PassThru
+            $t = 0
+            while (-not (Test-Path $ready) -and $t -lt 300) { Start-Sleep -Milliseconds 100; $t++ }
+            if (-not (Test-Path $ready)) { $p.Kill(); Fail "第 $i 轮：写入阶段没有就绪" }
+            Stop-Process -Id $p.Id -Force
+            $p.WaitForExit(10000) | Out-Null
+            $out = Join-Path $env:RUNNER_TEMP "check-$i.txt"
+            $c = Start-Process -FilePath $exe -ArgumentList '--selftest-session', 'check', $marker, $out -PassThru
+            if (-not $c.WaitForExit(60000)) { $c.Kill(); Fail "第 $i 轮：检查阶段超时" }
+            if (-not (Test-Path $out)) { Fail "第 $i 轮：检查阶段没有输出（退出码 $($c.ExitCode)）" }
+            $r = Get-Content $out
+            if ($r -contains 'found=1') { $pass++ } else { Fail ("第 $i 轮没有恢复：" + ($r -join ' ')) }
+          }
+          Write-Host "::notice title=会话强杀测试::强杀 $n 次，恢复 $pass 次"
+
       - uses: actions/upload-artifact@v4
         with:
           name: hurshnote-${{ github.sha }}

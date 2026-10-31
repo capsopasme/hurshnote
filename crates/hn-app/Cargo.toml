@@ -13,6 +13,9 @@ path = "src/main.rs"
 [dependencies]
 hn-text.workspace = true
 hn-search.workspace = true
+hn-core.workspace = true
+hn-crypto.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 hn-sci.workspace = true
@@ -21,9 +24,11 @@ windows-sys = { workspace = true, features = [
   "Win32_Globalization",
   "Win32_Graphics_Gdi",
   "Win32_Security",
+  "Win32_Storage_FileSystem",
   "Win32_System_DataExchange",
   "Win32_System_Diagnostics_Debug",
   "Win32_System_LibraryLoader",
+  "Win32_System_Registry",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_UI_Controls",

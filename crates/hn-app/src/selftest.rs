@@ -265,6 +265,64 @@ pub fn run(app: &App, startup_ms: f64) -> String {
     app.st_command(IDM_VIEW_ZOOM_RESET);
     check("zoom", zoomed && app.st_zoom() == 100, "", &mut out);
 
+    // 10. 安全保存
+    let dir = std::env::temp_dir().join(format!("hn-selftest-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let plain = dir.join("plain.txt");
+    app.new_document();
+    set_text(&sci, "保存测试\r\n第二行");
+    sci.send(SCI_APPENDTEXT, 1, b"!".as_ptr() as isize);
+    let saved = app.st_write_active(&plain);
+    let on_disk = std::fs::read(&plain).unwrap_or_default();
+    check(
+        "safe_save",
+        saved && on_disk == "保存测试\r\n第二行!".as_bytes() && !sci.is_modified(),
+        &format!("saved={saved} {:?}", String::from_utf8_lossy(&on_disk)),
+        &mut out,
+    );
+
+    // 11. 加密文件：打开 → 编辑 → 保存 → 用密码重新解密
+    let enc_path = dir.join("secret.hne");
+    let params = hn_crypto::KdfParams {
+        m_cost_kib: 1024,
+        t_cost: 1,
+        p_cost: 1,
+    };
+    let enc_ok = (|| -> Option<bool> {
+        let key = hn_crypto::Key::generate("测试密码", params).ok()?;
+        let payload = hn_core::payload::Payload::new("机密第一行\r\n".as_bytes().to_vec())
+            .with("eol", "crlf");
+        let file = hn_crypto::seal(&key, &payload.encode()).ok()?;
+        std::fs::write(&enc_path, &file).ok()?;
+        let (k2, pt) = hn_crypto::open_with_password("测试密码", &file).ok()?;
+        let p2 = hn_core::payload::Payload::decode(&pt).ok()?;
+        let stamp = hn_core::stamp::DiskStamp::new(0, &file);
+        if !app.st_install_encrypted(&enc_path, k2, p2, stamp) || !app.st_active_encrypted() {
+            return Some(false);
+        }
+        if text(&sci) != "机密第一行\r\n" {
+            return Some(false);
+        }
+        let end = sci.len();
+        sci.set_sel(end, end);
+        sci.send_str(SCI_REPLACESEL, 0, "追加");
+        if !app.st_write_active(&enc_path) {
+            return Some(false);
+        }
+        let written = std::fs::read(&enc_path).ok()?;
+        if written.windows(6).any(|w| w == "机密".as_bytes()) {
+            return Some(false); // 明文泄漏
+        }
+        let (_, pt3) = hn_crypto::open_with_password("测试密码", &written).ok()?;
+        let p3 = hn_core::payload::Payload::decode(&pt3).ok()?;
+        Some(p3.text == "机密第一行\r\n追加".as_bytes())
+    })()
+    .unwrap_or(false);
+    check("encrypted_roundtrip", enc_ok, "", &mut out);
+    app.st_close_active();
+    app.st_close_active();
+    let _ = std::fs::remove_dir_all(&dir);
+
     sci.set_save_point();
     writeln!(out, "result={}", if ok { "pass" } else { "fail" }).unwrap();
     out

@@ -18,6 +18,9 @@ pub const IDM_FILE_CLOSE: u16 = 1006;
 pub const IDM_FILE_CLOSE_ALL: u16 = 1007;
 pub const IDM_FILE_EXIT: u16 = 1008;
 pub const IDM_RECENT_CLEAR: u16 = 1009;
+pub const IDM_FILE_SAVE_ENCRYPTED: u16 = 1010;
+pub const IDM_SET_SNAPSHOTS: u16 = 1011;
+pub const IDM_SET_AUTO_RELOAD: u16 = 1012;
 
 // ---- 编辑 ----
 pub const IDM_EDIT_UNDO: u16 = 1101;
@@ -282,11 +285,25 @@ const FILE: &[Item] = &[
     Cmd(IDM_FILE_SAVE, "保存(&S)"),
     Cmd(IDM_FILE_SAVE_AS, "另存为(&A)..."),
     Cmd(IDM_FILE_SAVE_ALL, "全部保存(&L)"),
+    Cmd(IDM_FILE_SAVE_ENCRYPTED, "另存为加密文件(&E)..."),
     Sep,
     Cmd(IDM_FILE_CLOSE, "关闭(&C)"),
     Cmd(IDM_FILE_CLOSE_ALL, "全部关闭"),
     Sep,
+    Sub("设置(&T)", SETTINGS),
+    Sep,
     Cmd(IDM_FILE_EXIT, "退出(&X)\tAlt+F4"),
+];
+
+const SETTINGS: &[Item] = &[
+    Cmd(
+        IDM_SET_SNAPSHOTS,
+        "会话快照：关闭时不询问，下次启动恢复未保存内容",
+    ),
+    Cmd(
+        IDM_SET_AUTO_RELOAD,
+        "文件被外部修改时自动重新载入（未修改的文档）",
+    ),
 ];
 
 const LINE_OPS: &[Item] = &[
