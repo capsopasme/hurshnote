@@ -34,8 +34,8 @@ const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_TABSTOP: u32 = 0x0001_0000;
 const WS_CLIPCHILDREN: u32 = 0x0200_0000;
 
-/// 注册 Scintilla 窗口类。程序启动时调用一次。
-pub fn register_classes(hinstance: *mut c_void) -> bool {
+/// 注册 Scintilla 窗口类。程序启动时调用一次，`hinstance` 为本模块句柄。
+pub unsafe fn register_classes(hinstance: *mut c_void) -> bool {
     unsafe { Scintilla_RegisterClasses(hinstance) != 0 }
 }
 
