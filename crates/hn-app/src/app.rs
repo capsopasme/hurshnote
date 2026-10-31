@@ -1442,7 +1442,6 @@ impl App {
             SCN_MARGINCLICK if n.margin as usize == theme::MARGIN_BOOKMARKS => {
                 editops::toggle_bookmark(sci, sci.line_from_pos(n.position as usize));
             }
-            }
             _ => {}
         }
     }
