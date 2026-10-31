@@ -143,10 +143,6 @@ impl Searcher {
             .utf(true)
             .ucp(true)
             .jit_if_available(true);
-        // 安全：接口只接受 &str，主题文本保证是合法 UTF-8，无需 PCRE2 每次重复校验。
-        unsafe {
-            b.disable_utf_check();
-        }
         let re = b.build(&body).map_err(|e| Error::Regex(e.to_string()))?;
         Ok(Searcher { re, mode: opt.mode })
     }
