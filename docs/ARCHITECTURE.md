@@ -70,6 +70,8 @@ hurshnote/
   docs/
 ```
 
+**M5 新增：** `hn-run`（解释器探测、子进程与 Job Object、Traceback 定位、ANSI 颜色解码；只依赖 std）、`hn-term`（`alacritty_terminal` 封装：PTY、VT 状态机、渲染快照、按键编码、配色），`hn-search::dir`（目录搜索与替换核心），`hn-app` 中的 `term`（终端窗口）、`dirdlg`（在文件中查找对话框），以及 `app` 的子模块 `drawer`（底部抽屉：页签、搜索结果、输出面板、终端页）、`dirsearch`（目录搜索与替换）、`runpy`（运行 Python）。M4 的搜索结果面板并入抽屉。
+
 **M4 新增：** `hn-large`（字节源与块缓存、稀疏行索引、显示行导航、按行对齐的分块遍历、Hex 行格式、文件状态与变化分类；只依赖 std，Linux 上有完整单元测试）、`hn-render`（Direct2D/DirectWrite 封装），`hn-app` 中的 `lview`（大文件视图窗口与文档状态）以及 `app` 的子模块 `large`（打开、轮询、Tail、Hex 切换、后台搜索、搜索结果面板、状态栏）。`hn-term`、`hn-run`、`hn-md` 尚未创建。
 
 **M2 新增：** `hn-crypto`（加密格式）、`hn-core`（会话清单、快照、文档数据布局、磁盘戳、原子写入；均跨平台），`hn-app` 中的 `fsio`（安全保存与提权）、`watcher`、`crashdump`、`pwdlg`，以及 `app` 的子模块 `persist`（快照与会话）、`files`（保存、加密文件、外部修改）。
@@ -232,8 +234,8 @@ settings.ini / recent.txt 设置与最近文件
 
 - 编辑器内：`SCI_GETCHARACTERPOINTER` 拿连续缓冲区 → PCRE2 匹配 → `SCI_SETSEL` / `SCI_REPLACETARGET`。全部替换在一个 `SCI_BEGINUNDOACTION` / `SCI_ENDUNDOACTION` 里完成，并且从后往前替换以避免偏移失效。
 - 三种模式：普通 / 转义（`\n \r \t \0 \xNN \uNNNN`）/ 正则；选项：大小写、全词、仅选区、循环、方向。
-- 目录搜索：后台 `ignore::WalkParallel` + `grep-searcher`；跳过二进制文件、加密文件（魔数检测）、超过阈值的文件（可选）；结果按文件分组，每 50 ms 一批送 UI；可取消。
-- 在目录中替换：先预览，再逐文件走与"保存"相同的安全写入流程；已打开且有修改的文件改为在编辑器缓冲区内替换。
+- 目录搜索（`hn_search::dir`）：后台 `ignore::WalkParallel`（遵守 `.gitignore`、跳过隐藏文件、包含/排除通配符，默认排除 `node_modules`）；每个文件读入后用 `hn-text` 嗅探编码、解码为 UTF-8 再用 PCRE2 匹配，所以 GBK、UTF-16 文件也能搜，结果的列号是解码后行内的 UTF-8 字节偏移（与编辑器缓冲区一致）；跳过二进制文件、加密文件（魔数）、超过 64 MB 的文件；每个文件最多记录 1 万处。结果按文件合批，约每 100 ms 经 channel + `PostMessage(WM_APP_DIRSEARCH)` 送 UI（`pending` 标志合并唤醒，代号丢弃过期结果）；`AtomicBool` 取消。结束后按路径排序重排列表。
+- 在目录中替换：先按同样条件搜索，结果列表即预览，结束后确认；已在编辑器中打开的文件在缓冲区内替换（一个撤销组，需要用户保存）；其余文件按原编码（含 BOM）重新编码后走 `fsio::save_file` 安全写入。解码有损、或替换后有字符无法用原编码表示的文件跳过并在输出面板列出原因。
 
 ### 6.9 加密文件格式 v1（hn-crypto）
 
@@ -314,25 +316,28 @@ settings.ini / recent.txt 设置与最近文件
 - **Ctrl+Tab**：在消息循环里预处理按键（`App::pretranslate`），弹出不抢焦点的列表（`WS_EX_NOACTIVATE`），按住 Ctrl 连按 Tab 选择，松开 Ctrl 时切换。**Ctrl+P**：非模态对话框，候选为已打开文档、最近文件与工作区文件索引（后台线程遍历，`PostMessage` 回传），输入变化时用 `hn_text::fuzzy` 排序。
 - 侧边栏和快速打开里不带 Ctrl 的按键不走加速键表（否则 F2 会变成"下一个书签"而不是重命名）。
 
-### 6.13 终端（hn-term）
+### 6.13 终端（hn-term + hn-app/term）
 
-- `CreatePseudoConsole` + 两根管道；一个线程读输出喂给 `alacritty_terminal` 的 VT 状态机，UI 线程按帧绘制网格。
-- 默认 shell：PowerShell 5.1（Win10 自带，带 PSReadLine，补全由它提供）；可选 `cmd.exe`、`pwsh.exe`（若已安装）。工作目录 = 当前文件所在目录或工作区根目录。
-- 宽字符按 East Asian Width 占两格；字体回退由 DirectWrite 完成。
-- 自绘控件自行处理 IME：`WM_IME_STARTCOMPOSITION` 时用 `ImmSetCompositionWindow` 把候选窗定位到光标处，`WM_IME_COMPOSITION` 取结果字符串写入 PTY。
-- 复制/粘贴：有选区时 Ctrl+C 复制，否则发送 `\x03`；Ctrl+V 粘贴（多行粘贴前提示）。
-- 关闭：在独立线程继续排空输出管道的同时调用 `ClosePseudoConsole`，避免死锁；用 Job Object 确保子进程树退出。
-- 1809 自带 ConPTY 有已知问题；评估随程序附带微软的 ConPTY 包（`conpty.dll` + `OpenConsole.exe`，MIT）在 1809 上是否可用，可用则优先加载随附版本。
+- 伪终端与 VT 状态机用 `alacritty_terminal` 0.26（Apache-2.0）：Windows 上它通过 ConPTY 启动 shell，exe 同目录（或 PATH）中有微软的 `conpty.dll` + `OpenConsole.exe` 时优先加载这个随附版本，否则用系统自带的 ConPTY——这就是"随附版 ConPTY"的接入方式，发布包可以选择是否附带这两个文件（MIT）。PTY 读取在它的事件循环线程中进行，状态在 `FairMutex<Term>` 里。
+- 后台线程只通过回调通知：事件放进 `Mutex<Vec<TermEvent>>`，`pending` 标志为假时才 `PostMessage(WM_APP_TERM)` 给终端窗口自己，输出很多时也只有一条唤醒消息在队列中。
+- 绘制：`Terminal::snapshot` 在锁内把可见区域复制成与平台无关的 `Snapshot`（颜色已按 Gruvbox Light 终端配色换算，处理 DIM/INVERSE/HIDDEN、选区），UI 线程释放锁后用 `hn-render` 画：同色背景合并成块；ASCII 按样式连续绘制（等宽字体前进宽度与格子一致），其他字符逐个画在自己的格子里（宽字符两格），避免回退字体的宽度把后面的字符挤歪；粗体、斜体用单独的 `Font`；下划线、删除线、块/竖线/下划线光标，失去焦点时为空心框。
+- 键盘：方向键、Home/End、PgUp/PgDn、Insert/Delete、F1–F12 在 `WM_KEYDOWN` 中按 xterm 约定编码（修饰参数、DECCKM 应用光标模式）；其余字符走 `WM_CHAR`（Ctrl+字母已是控制字符；Backspace 发 DEL，Ctrl+Backspace 发 BS；代理对拼接）；`WM_SYSCHAR` → ESC 前缀（Alt+字符，不激活菜单）。终端获得焦点时，消息循环只让 Ctrl+` / Ctrl+Shift+` 走加速键表，其余按键都给终端。
+- 复制粘贴：有选区时 Ctrl+C 复制，否则发 `\x03`；Ctrl+Shift+C/V、Ctrl+V、Shift+Insert；右键有选区时复制，否则粘贴；中键粘贴；括号粘贴模式下加标记并去掉文本中的结束标记。鼠标单击/双击/三击 = 字符/词/行选择。
+- 滚轮：普通屏幕滚动回看（1 万行）；全屏程序（备用屏 + 备用滚动模式，如 vim、less）中换成方向键。Shift+PgUp/PgDn 翻页回看。暂不向程序报告鼠标事件。
+- 输入法：`WM_IME_STARTCOMPOSITION` / `WM_IME_COMPOSITION` 时用 `ImmSetCompositionWindow(CFS_POINT)` 把组字窗口放到光标处，其余交给 `DefWindowProc`，上屏文字以 `WM_CHAR` 到达。
+- 尺寸：窗口 `WM_SIZE` 时按格子尺寸算行列，`Terminal::resize` 同时调整 VT 网格与 PTY（尺寸没变时不发）。
+- shell：设置 `terminal_shell`（powershell / pwsh / cmd 或完整路径），菜单可指定；工作目录 = 当前文件所在目录 → 第一个工作区目录 → 用户目录。shell 退出时关闭终端页；关闭终端时发 `Shutdown`，PTY 在事件循环线程中释放（`ClosePseudoConsole` 不在 UI 线程等待）。
+- 多个终端：每个终端一个窗口、一个抽屉页签（"PowerShell 1"、"cmd 2"……）。
 
-### 6.14 运行 Python（hn-run）
+### 6.14 运行 Python（hn-run + app/runpy）
 
-- 解释器探测顺序：设置中指定 → 工作区内 `.venv` / `venv` → `py -3` 启动器 → PATH 中的 `python.exe`（**排除 `WindowsApps` 下的商店占位程序**）。
-- 启动参数：`python -u script.py`，环境变量 `PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`；工作目录 = 脚本所在目录。
-- 运行前若文件有修改：自动保存（可设置），未命名文件写到临时目录运行。
-- 子进程放入 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`），"停止"杀掉整棵进程树。
-- stdout / stderr 两根管道，两个读取线程，合批送 UI；stderr 用红色；支持基础 ANSI SGR 颜色。
-- 输出中的 `File "x.py", line N` 可点击跳转。
-- 输出面板不支持 `input()`；提供"在终端中运行"命令（向终端发送 `python "x.py"`）。
+- 解释器探测顺序：设置 `python` 指定 → 脚本所在目录与工作区根目录下的 `.venv` / `venv` → `py -3` 启动器 → PATH 中的 `python.exe`（**排除 `WindowsApps` 下的商店占位程序**）。
+- 启动参数：`python -u script.py`，环境变量 `PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`；工作目录 = 脚本所在目录；`CREATE_NO_WINDOW`。
+- 运行前若文件有修改先保存；未命名文档写到 `%TEMP%\HurshNote\run\untitled-N.py` 运行。
+- 子进程放入 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`），"停止"结束整棵进程树；`Running` 被丢弃（再次运行、程序退出）时 Job 句柄关闭，残留子进程也会结束。
+- stdout / stderr 两根管道各一个读取线程，等待线程在两者读完后才发"退出"事件；事件经队列 + `PostMessage(WM_APP_RUN)` 送 UI（`pending` 合并唤醒，代号丢弃上一次运行的残留）。每个流一个增量解码器（拼接跨块的 UTF-8 与转义序列，只解释 SGR 前景色）；stderr 红色；结束时显示退出码与耗时。
+- 输出面板是只读、无撤销的 Scintilla（由程序着色，超过 8 MB 时删掉开头）；双击 `File "x.py", line N`、`x.rs:12:5`、`x.cs(12,5)` 这类行跳转到源码（相对路径以脚本目录为基准）。
+- 输出面板不支持 `input()`（stdin 为空）；Ctrl+F5 在新终端中运行（按 shell 种类拼好命令行写入终端）。
 
 ### 6.15 Markdown 预览（hn-md + hn-app）
 
@@ -360,6 +365,12 @@ settings.ini / recent.txt 设置与最近文件
 - 默认：`%APPDATA%\HurshNote\settings.toml`（serde + `#[serde(default)]`，缺字段取默认值；首次运行时迁移 M1/M2 的 `settings.ini`）。
 - exe 同目录存在 `portable.flag` 时进入便携模式，所有数据写到 exe 同目录的 `data\`；环境变量 `HURSHNOTE_DATA_DIR` 可覆盖（测试用）。
 - 设置变更即时生效，写文件同样走原子替换。
+
+### 6.19 底部抽屉（app/drawer）
+
+- 编辑区下方：顶部一条页签（`SysTabControl32` 按钮样式，右侧是状态文字：搜索进度、运行状态），下面是当前页面窗口；高度可拖动（分隔条同侧边栏，DIP 存在设置 `drawer_height`）。
+- 页面：**搜索结果**（虚拟 ListView，大文件搜索的匹配与目录搜索的"文件行 + 匹配行"共用；双击/回车跳转，Esc 隐藏）、**输出**（运行 Python、目录替换的问题列表）、**终端**（每个终端一页）。
+- 快捷键：F7 搜索结果；Ctrl+` 显示/隐藏抽屉（没有终端时新建一个）；Ctrl+Shift+` 新建终端；Ctrl+Shift+F 在文件中查找；F5 / Ctrl+F5 / Shift+F5 运行、在终端中运行、停止。菜单"运行"汇总这些命令。
 
 ## 7. 性能预算（每个里程碑都要回归）
 

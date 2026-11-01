@@ -108,31 +108,42 @@
 
 ## 搜索
 
-- [ ] PCRE2 对无效 UTF-8 输入会报错 → 编辑器内文本保证是 UTF-8；目录搜索对非 UTF-8 文件先转码或用 `PCRE2_MATCH_INVALID_UTF`。
+- [x] PCRE2 对无效 UTF-8 输入会报错 → 编辑器内文本保证是 UTF-8；目录搜索对每个文件先嗅探编码、转成 UTF-8 再匹配。
 - [ ] 灾难性回溯 → 设置匹配限制（`match_limit`/超时），超限时报告而不是卡死。
 - [ ] 零长度匹配（如 `^`、`\b`）的全部替换要防止死循环。
 - [ ] "全部替换"从后往前替换，或记录偏移增量。
-- [ ] 搜索结果过多（几十万条）→ 列表用虚拟模式（`LVS_OWNERDATA`），设上限并提示。
-- [ ] 目录搜索默认跳过 `.git`、`node_modules`、二进制和加密文件。
+- [x] 搜索结果过多（几十万条）→ 列表用虚拟模式（`LVS_OWNERDATA`），设上限并提示（目录搜索每个文件最多记录 1 万处）。
+- [x] 目录搜索默认跳过 `.git`（隐藏目录）、`node_modules`、二进制和加密文件。
+- [x] 只有一个 NUL 的小二进制样本会被 UTF-16 启发式当成 UTF-16BE（NUL 全在偶数位）→ 测试样本要让 NUL 在奇偶位置上都出现；真实二进制文件一般不受影响。
+- [x] 目录替换不能把有损解码的文本写回（会把无法识别的字节变成 U+FFFD）→ 有损或替换后无法用原编码表示时跳过并说明原因。
+- [x] 搜索线程每批都 `PostMessage` 会灌满消息队列 → `pending` 标志：只有 UI 处理过上一条唤醒后才再投递；结束消息投递前先清标志，保证一定会被处理。
 
 ## 终端 / ConPTY
 
-- [ ] `ClosePseudoConsole` 期间如果没人读输出管道会死锁 → 先保证读取线程在运行。
+- [x] `ClosePseudoConsole` 期间如果没人读输出管道会死锁 → 关闭终端只发 `Shutdown`，PTY 在 alacritty 的事件循环线程里释放，UI 线程不等待。
 - [ ] 1809 自带 ConPTY 的已知问题（重绘、resize 闪烁、部分 VT 序列）→ 评估随附新版 conpty。
-- [ ] 窗口大小变化要 `ResizePseudoConsole`，并做节流。
+- [x] 窗口大小变化要 `ResizePseudoConsole` → 按格子算出的行列数没变时不发送。
 - [ ] 东亚宽字符占两格；emoji 宽度依赖 Unicode 版本 → 与 conhost 保持一致的宽度表。
-- [ ] 自绘控件不处理 IME 就无法输入中文。
-- [ ] Ctrl+C 语义冲突：有选区复制，无选区发中断。
-- [ ] 关闭终端标签时 shell 的子进程（如正在跑的 python）要一并结束 → Job Object。
+- [x] 自绘控件不处理 IME 就无法输入中文 → 组字窗口用 `ImmSetCompositionWindow` 跟随光标，其余交给 `DefWindowProc`，上屏文字以 `WM_CHAR` 到达。
+- [x] 加速键表会吃掉终端里的 Ctrl+C/V/A/F、F5 等 → 焦点在终端时只让 Ctrl+` / Ctrl+Shift+` 走加速键。
+- [x] Alt+字母在终端里会激活菜单栏 → 终端自己处理 `WM_SYSCHAR`（发 ESC 前缀），只有 Alt+空格、Alt+F4 交给 `DefWindowProc`。
+- [x] Backspace 产生的 `WM_CHAR` 是 0x08，但大多数程序期望 DEL（0x7f）→ 互换；Shift+Tab、Ctrl+空格在 `WM_KEYDOWN` 中处理后要丢掉紧随的 `WM_CHAR`。
+- [x] PTY 输出很多时每次唤醒都 `PostMessage` 会灌满队列 → `pending` 标志合并唤醒，绘制时一次取快照。
+- [x] 回退字体（中文、符号）的前进宽度和等宽网格不一致，整行一起画会把后面的字符挤歪 → 非 ASCII 字符逐个画在自己的格子里。
+- [x] Ctrl+C 语义冲突：有选区复制，无选区发中断。
+- [x] 关闭终端标签时 shell 的子进程（如正在跑的 python）要一并结束 → 关闭 ConPTY 时其中的进程随之结束。
 
 ## Python 运行
 
-- [ ] `python.exe` 可能是 `WindowsApps` 下的商店占位程序（0 字节重解析点），运行会弹商店 → 排除。
-- [ ] 输出缓冲导致迟迟不显示 → `-u`。
-- [ ] 中文乱码 → `PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`，按 UTF-8 解码输出。
-- [ ] `input()` 在管道模式下阻塞 → 输出面板说明，提供"在终端中运行"。
-- [ ] 停止只杀主进程会留下孤儿子进程 → Job Object。
-- [ ] 读取管道必须两个线程分别读 stdout/stderr，否则一个管道写满会死锁。
+- [x] `python.exe` 可能是 `WindowsApps` 下的商店占位程序（0 字节重解析点），运行会弹商店 → 排除。
+- [x] 输出缓冲导致迟迟不显示 → `-u`。
+- [x] 中文乱码 → `PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`，按 UTF-8 解码输出。
+- [x] `input()` 在管道模式下阻塞 → 输出面板说明，提供"在终端中运行"。
+- [x] 停止只杀主进程会留下孤儿子进程 → Job Object。
+- [x] 读取管道必须两个线程分别读 stdout/stderr，否则一个管道写满会死锁。
+- [x] "退出"事件可能先于最后一段输出到达 → 等待线程在两个读取线程结束后才发"退出"。
+- [x] 输出块可能在 UTF-8 字符或转义序列中间断开 → 每个流一个增量解码器。
+- [x] Rust 的 `Command` 会给含空格的参数加引号，`cmd /c "echo a& echo b"` 中 cmd 会把整串当成命令名 → 给 cmd 传命令时每段参数不含空格，或改用 `raw_arg`。
 
 ## 侧边栏 / 系统图标
 

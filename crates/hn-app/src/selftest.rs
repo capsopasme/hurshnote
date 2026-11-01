@@ -690,6 +690,12 @@ fn dev_checks(app: &App, dir: &std::path::Path, check: &mut dyn FnMut(&str, bool
             && sel.as_deref() == Some("needle")
     });
     check("dir_jump", jumped, "");
+    let drawer = app.st_drawer();
+    check(
+        "drawer_results",
+        drawer == (true, Some("results")),
+        &format!("{drawer:?}"),
+    );
     app.st_close_active();
 
     // 替换：a.rs 已在编辑器中打开 → 在缓冲区替换；gbk.txt 未打开 → 按 GBK 写回磁盘

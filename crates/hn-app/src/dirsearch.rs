@@ -34,7 +34,6 @@ pub(super) enum DirMsg {
 
 /// 正在进行（或刚结束）的目录搜索。
 pub(super) struct DirJob {
-    gen: u32,
     cancel: Arc<AtomicBool>,
     query: DirQuery,
     /// 替换模板（替换任务）
@@ -177,7 +176,6 @@ impl App {
         self.dir_gen.set(gen);
         let cancel = Arc::new(AtomicBool::new(false));
         *self.dir_job.borrow_mut() = Some(DirJob {
-            gen,
             cancel: cancel.clone(),
             query: q.clone(),
             replace,

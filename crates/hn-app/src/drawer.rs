@@ -33,7 +33,7 @@ const SS_CENTERIMAGE: u32 = 0x200;
 const SS_ENDELLIPSIS: u32 = 0x4000;
 
 #[repr(C)]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, clippy::upper_case_acronyms)]
 struct TCITEMW {
     mask: u32,
     dwState: u32,

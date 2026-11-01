@@ -84,7 +84,7 @@ const CF_UNICODETEXT: u32 = 13;
 const CFS_POINT: u32 = 0x0002;
 
 #[repr(C)]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, clippy::upper_case_acronyms)]
 struct COMPOSITIONFORM {
     dwStyle: u32,
     ptCurrentPos: POINT,
@@ -739,8 +739,8 @@ impl TermView {
 
     fn on_wheel(&self, delta: i32) {
         let acc = self.wheel_accum.get() + delta;
-        let lines = acc * 3 / WHEEL_DELTA as i32;
-        self.wheel_accum.set(acc - lines * WHEEL_DELTA as i32 / 3);
+        let lines = acc * 3 / WHEEL_DELTA;
+        self.wheel_accum.set(acc - lines * WHEEL_DELTA / 3);
         if lines == 0 {
             return;
         }
