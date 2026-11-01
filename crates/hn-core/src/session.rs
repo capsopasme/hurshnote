@@ -17,6 +17,14 @@ pub struct Session {
     /// 当前文档在 `docs` 中的下标
     pub active: usize,
     pub docs: Vec<SessionDoc>,
+    /// 分屏：0 不分屏，1 左右，2 上下
+    pub split: u8,
+    /// 第一个视图所占比例
+    pub split_ratio: f32,
+    /// 第二个视图显示的文档下标
+    pub view2: Option<usize>,
+    /// 获得焦点的视图（0 或 1）
+    pub focus: usize,
 }
 
 impl Default for Session {
@@ -25,6 +33,10 @@ impl Default for Session {
             version: VERSION,
             active: 0,
             docs: Vec::new(),
+            split: 0,
+            split_ratio: 0.5,
+            view2: None,
+            focus: 0,
         }
     }
 }
@@ -69,6 +81,18 @@ impl Session {
         if s.active >= s.docs.len() {
             s.active = 0;
         }
+        if s.view2.is_some_and(|v| v >= s.docs.len()) {
+            s.view2 = None;
+        }
+        if !(0.1..=0.9).contains(&s.split_ratio) {
+            s.split_ratio = 0.5;
+        }
+        if s.split > 2 {
+            s.split = 0;
+        }
+        if s.focus > 1 || s.split == 0 {
+            s.focus = 0;
+        }
         Ok(s)
     }
 
@@ -90,6 +114,10 @@ mod tests {
         let s = Session {
             version: VERSION,
             active: 1,
+            split: 1,
+            split_ratio: 0.4,
+            view2: Some(0),
+            focus: 1,
             docs: vec![
                 SessionDoc {
                     path: Some(PathBuf::from(r"C:\文档\a.txt")),
@@ -123,6 +151,8 @@ mod tests {
         assert_eq!(s.active, 0);
         assert_eq!(s.docs[0].path, Some(PathBuf::from("x.txt")));
         assert_eq!(s.version, VERSION);
+        assert_eq!(s.split_ratio, 0.5);
+        assert_eq!(s.split, 0);
     }
 
     #[test]

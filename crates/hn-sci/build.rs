@@ -74,6 +74,7 @@ fn main() {
         b.file(f);
     }
     b.file(native.join("hn_loader.cxx"));
+    b.file(native.join("hn_drop.cxx"));
     b.compile("scintilla");
 
     // ---- Lexilla（只编译需要的 lexer） ----
@@ -93,7 +94,7 @@ fn main() {
     b.compile("lexilla");
 
     for lib in [
-        "user32", "gdi32", "imm32", "ole32", "oleaut32", "advapi32", "uuid", "msimg32",
+        "user32", "gdi32", "imm32", "ole32", "oleaut32", "advapi32", "uuid", "msimg32", "shell32",
     ] {
         println!("cargo:rustc-link-lib={lib}");
     }

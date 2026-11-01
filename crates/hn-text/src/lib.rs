@@ -4,6 +4,7 @@
 
 pub mod encoding;
 pub mod eol;
+pub mod fuzzy;
 pub mod lang;
 pub mod lines;
 pub mod listcont;

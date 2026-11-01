@@ -16,6 +16,9 @@ hn-search.workspace = true
 hn-core.workspace = true
 hn-crypto.workspace = true
 zeroize.workspace = true
+serde.workspace = true
+toml.workspace = true
+ignore.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 hn-sci.workspace = true

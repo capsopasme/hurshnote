@@ -13,6 +13,8 @@ use crate::*;
 pub const MARK_BOOKMARK: usize = 18;
 /// "标记全部"使用的指示器。
 pub const INDIC_FIND: usize = 8;
+/// 拖放落点指示器（与 native/hn_drop.cxx 一致）。
+pub const INDIC_DROP: usize = 9;
 
 pub const MARGIN_NUMBERS: usize = 0;
 pub const MARGIN_BOOKMARKS: usize = 1;
@@ -298,6 +300,8 @@ pub fn init_view(sci: &Sci, p: &Palette, dpi: u32) {
     sci.send(SCI_INDICSETALPHA, INDIC_FIND, 110);
     sci.send(SCI_INDICSETOUTLINEALPHA, INDIC_FIND, 200);
     sci.send(SCI_INDICSETUNDER, INDIC_FIND, 1);
+    sci.send(SCI_INDICSETSTYLE, INDIC_DROP, INDIC_POINT);
+    sci.send(SCI_INDICSETFORE, INDIC_DROP, bgr(p.red));
 
     // 光标、当前行、选区、空白字符
     sci.send(SCI_SETELEMENTCOLOUR, SC_ELEMENT_CARET as usize, bgra(p.fg1));

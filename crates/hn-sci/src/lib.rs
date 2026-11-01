@@ -298,6 +298,38 @@ impl Sci {
     }
 }
 
+/// 拖入文件时的回调：`paths` 为以双 NUL 结尾、NUL 分隔的 UTF-16 路径列表。
+pub type DropFilesFn = unsafe extern "C" fn(ctx: *mut c_void, paths: *const u16);
+
+extern "C" {
+    fn hn_drop_register(sci: HWND, callback: DropFilesFn, ctx: *mut c_void) -> c_int;
+}
+
+/// 用自己的拖放目标替换 Scintilla 自带的（需要已 OleInitialize）。
+pub unsafe fn register_drop_target(sci: &Sci, callback: DropFilesFn, ctx: *mut c_void) -> bool {
+    unsafe { hn_drop_register(sci.hwnd(), callback, ctx) != 0 }
+}
+
+/// 解析拖放回调中的路径列表。
+pub unsafe fn parse_drop_paths(paths: *const u16) -> Vec<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    let mut out = Vec::new();
+    let mut p = paths;
+    loop {
+        let mut len = 0usize;
+        while unsafe { *p.add(len) } != 0 {
+            len += 1;
+        }
+        if len == 0 {
+            break;
+        }
+        let s = unsafe { std::slice::from_raw_parts(p, len) };
+        out.push(std::path::PathBuf::from(std::ffi::OsString::from_wide(s)));
+        p = unsafe { p.add(len + 1) };
+    }
+    out
+}
+
 extern "C" {
     fn hn_loader_add(loader: *mut c_void, data: *const c_char, length: isize) -> c_int;
     fn hn_loader_convert(loader: *mut c_void) -> *mut c_void;
