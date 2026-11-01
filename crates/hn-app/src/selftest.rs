@@ -338,6 +338,17 @@ pub fn run(app: &App, startup_ms: f64) -> String {
         &format!("{names:?}"),
         &mut out,
     );
+    let _ = std::fs::write(ws.join("delta.txt"), "d");
+    let _ = std::fs::remove_file(ws.join("alpha.txt"));
+    let synced = app.st_workspace_sync();
+    check(
+        "workspace_sync",
+        synced.iter().any(|n| n == "delta.txt")
+            && !synced.iter().any(|n| n == "alpha.txt")
+            && synced.first().map(String::as_str) == Some("sub"),
+        &format!("{synced:?}"),
+        &mut out,
+    );
     let hits = app.st_quick("bgam");
     check(
         "quick_open",

@@ -606,6 +606,9 @@ impl App {
             WM_ACTIVATE => {
                 if loword(wp) == 0 {
                     self.switcher_close(false);
+                } else {
+                    // 回到前台：同步工作区目录树
+                    unsafe { PostMessageW(hwnd, WM_APP_REFRESH, 3, 0) };
                 }
                 // 回到前台时处理期间积累的外部修改
                 if loword(wp) != 0 && !self.pending_fs.borrow().is_empty() {
@@ -698,6 +701,10 @@ impl App {
                 if wp == 2 {
                     let files: Vec<PathBuf> = self.pending_drop.borrow_mut().drain(..).collect();
                     self.open_dropped(files);
+                }
+                if wp == 3 {
+                    self.sync_workspace();
+                    return Some(0);
                 }
                 self.refresh();
                 Some(0)
@@ -2449,6 +2456,11 @@ impl App {
             s.respect_gitignore = true;
         }
         self.populate_workspace();
+        self.st_expand_first_root()
+    }
+    /// 自测：与磁盘同步目录树后返回根节点的子项。
+    pub(crate) fn st_workspace_sync(&self) -> Vec<String> {
+        self.sync_workspace();
         self.st_expand_first_root()
     }
     /// 自测：同步建立索引后执行快速打开查询。

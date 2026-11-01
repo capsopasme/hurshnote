@@ -69,6 +69,7 @@ pub const TVM_GETNEXTITEM: u32 = 0x110A;
 pub const TVM_SELECTITEM: u32 = 0x110B;
 pub const TVM_HITTEST: u32 = 0x1111;
 pub const TVM_ENDEDITLABELNOW: u32 = 0x1116;
+pub const TVM_GETITEMSTATE: u32 = 0x1127;
 pub const TVM_SETBKCOLOR: u32 = 0x111D;
 pub const TVM_SETTEXTCOLOR: u32 = 0x111E;
 pub const TVM_SETEXTENDEDSTYLE: u32 = 0x112C;
@@ -103,6 +104,8 @@ pub const TVGN_CARET: usize = 0x9;
 pub const TVSIL_NORMAL: usize = 0;
 pub const TVI_ROOT: isize = -0x10000;
 pub const TVI_LAST: isize = -0xFFFE;
+pub const TVI_FIRST: isize = -0xFFFF;
+pub const TVIS_EXPANDED: u32 = 0x20;
 pub const TVHT_ONITEM: u32 = 0x46;
 
 // ---- ListBox ----

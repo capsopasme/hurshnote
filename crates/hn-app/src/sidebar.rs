@@ -700,6 +700,17 @@ impl App {
     // ---- 工作区目录树 ----
 
     fn tree_insert(&self, parent: isize, path: &Path, label: &str, is_dir: bool) -> isize {
+        self.tree_insert_after(parent, TVI_LAST, path, label, is_dir)
+    }
+
+    fn tree_insert_after(
+        &self,
+        parent: isize,
+        after: isize,
+        path: &Path,
+        label: &str,
+        is_dir: bool,
+    ) -> isize {
         let idx = {
             let mut nodes = self.tree_nodes.borrow_mut();
             nodes.push(path.to_path_buf());
@@ -714,7 +725,7 @@ impl App {
         };
         let ins = TVINSERTSTRUCTW::new(
             parent,
-            TVI_LAST,
+            after,
             TVITEMW {
                 mask: TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_CHILDREN,
                 pszText: w.as_ptr() as *mut u16,
@@ -861,6 +872,79 @@ impl App {
                 },
             );
             unsafe { SendMessageW(tree, TVM_INSERTITEMW, 0, &ins as *const _ as isize) };
+        }
+    }
+
+    fn tree_children(&self, item: isize) -> Vec<isize> {
+        let tree = self.side_tree.get();
+        let mut out = Vec::new();
+        let mut c = unsafe { SendMessageW(tree, TVM_GETNEXTITEM, TVGN_CHILD, item) };
+        while c != 0 {
+            out.push(c);
+            c = unsafe { SendMessageW(tree, TVM_GETNEXTITEM, TVGN_NEXT, c) };
+        }
+        out
+    }
+
+    /// 与磁盘同步已载入的目录节点（窗口回到前台时调用）：只增删变化的项，保留展开状态。
+    pub(super) fn sync_workspace(&self) {
+        let tree = self.side_tree.get();
+        if tree.is_null() {
+            return;
+        }
+        let mut root = unsafe { SendMessageW(tree, TVM_GETNEXTITEM, TVGN_ROOT, 0) };
+        while root != 0 {
+            self.sync_node(root, 0);
+            root = unsafe { SendMessageW(tree, TVM_GETNEXTITEM, TVGN_NEXT, root) };
+        }
+    }
+
+    fn sync_node(&self, item: isize, depth: usize) {
+        let tree = self.side_tree.get();
+        let kids = self.tree_children(item);
+        // 未载入的节点、超大目录（有"未显示"占位）不同步
+        if depth > 64
+            || kids.is_empty()
+            || kids.iter().any(|&k| self.item_param(k) == Some(NODE_MORE))
+        {
+            return;
+        }
+        let Some(dir) = self.item_path(item).filter(|p| p.is_dir()) else {
+            return;
+        };
+        let (entries, total) = self.list_dir(&dir);
+        if total > entries.len() {
+            return;
+        }
+        let existing: Vec<(isize, PathBuf)> = kids
+            .iter()
+            .filter_map(|&k| self.item_path(k).map(|p| (k, p)))
+            .collect();
+        for (k, p) in &existing {
+            if !entries.iter().any(|(e, _)| e == p) {
+                unsafe { SendMessageW(tree, TVM_DELETEITEM, 0, *k) };
+            }
+        }
+        // 新增项按排序位置插入到前一项之后
+        let mut prev = TVI_FIRST;
+        for (p, is_dir) in &entries {
+            match existing.iter().find(|(_, ep)| ep == p) {
+                Some((k, _)) => prev = *k,
+                None => {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    prev = self.tree_insert_after(item, prev, p, &name, *is_dir);
+                }
+            }
+        }
+        for k in self.tree_children(item) {
+            let st =
+                unsafe { SendMessageW(tree, TVM_GETITEMSTATE, k as usize, TVIS_EXPANDED as isize) };
+            if st as u32 & TVIS_EXPANDED != 0 {
+                self.sync_node(k, depth + 1);
+            }
         }
     }
 
