@@ -279,10 +279,13 @@ settings.ini / recent.txt 设置与最近文件
 
 ### 6.12 侧边栏（hn-app）
 
-- 上下两块：**打开的文件**（ListView，显示 Dirty 圆点、只读锁、加密标记，可拖动排序，可按目录分组）与**工作区**（TreeView，懒加载子目录，可选遵守 `.gitignore`，由文件监控驱动刷新）。
-- 图标：`SHGetFileInfoW(path, FILE_ATTRIBUTE_NORMAL, SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON)` 取系统图像列表索引，按扩展名缓存；`.exe/.lnk/.ico` 这类需要读文件的图标在后台 STA 线程取，取到前用通用图标。
-- 工作区可保存为 `.hnworkspace`（TOML：根目录列表、排除规则）。
-- **Ctrl+Tab**：弹出 MRU 列表，按住 Ctrl 连按 Tab 选择，松开切换。**Ctrl+P**：模糊匹配已打开文件 + 工作区文件（后台建文件名索引）。
+- 代码：`app/sidebar.rs`（侧边栏与分隔条）、`app/views.rs`（分屏与 Ctrl+Tab）、`app/quick.rs`（Ctrl+P），都是 `app` 的子模块，可直接访问 `App` 的私有字段；控件句柄放在 `Cell` 中，避免控件发出的 `WM_NOTIFY` 重入时撞上 `RefCell` 借用。
+- 上下两块：**打开的文件**（虚拟 ListView，`LVS_OWNERDATA`，文字在 `LVN_GETDISPINFO` 中按需生成：`*` 表示有修改，另有 `[加密]`、`[已删除]` 标记；`LVN_BEGINDRAG` + 捕获鼠标实现拖动排序）与**工作区**（TreeView，`TVN_ITEMEXPANDING` 时用 `ignore::WalkBuilder(max_depth=1)` 枚举，目录在前，每个目录最多 1 万项；窗口回到前台时同步已载入的目录，只增删变化的项，保留展开状态）。
+- 图标：`SHGetFileInfoW(name, attr, SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON)` 取系统图像列表索引，按扩展名缓存，不访问磁盘；列表与树共用系统图像列表（`LVS_SHAREIMAGELISTS`，不能销毁）。
+- 分隔条不是子窗口：主窗口在布局时记下各分隔条矩形，自己处理 `WM_SETCURSOR` / `WM_LBUTTONDOWN` / `WM_MOUSEMOVE` / `WM_LBUTTONUP`（`SetCapture`）。侧边栏宽度用 DIP 存在设置中。
+- **分屏**：两个 Scintilla 视图（第二个平时隐藏），共享文档（引用计数）。`sci` 始终指向焦点视图，`active` 是焦点视图中的文档，所有命令只作用于焦点视图；另一视图只显示。`SCN_FOCUSIN` 切换焦点视图；离开焦点视图前把位置、书签、折叠、只读等记到 `Doc`。激活一个已在另一视图显示的文档 = 把焦点移过去。关闭文档前，另一视图若显示它，改为显示焦点视图的文档。会话中 `view2` 记录非焦点视图的文档。
+- **Ctrl+Tab**：在消息循环里预处理按键（`App::pretranslate`），弹出不抢焦点的列表（`WS_EX_NOACTIVATE`），按住 Ctrl 连按 Tab 选择，松开 Ctrl 时切换。**Ctrl+P**：非模态对话框，候选为已打开文档、最近文件与工作区文件索引（后台线程遍历，`PostMessage` 回传），输入变化时用 `hn_text::fuzzy` 排序。
+- 侧边栏和快速打开里不带 Ctrl 的按键不走加速键表（否则 F2 会变成"下一个书签"而不是重命名）。
 
 ### 6.13 终端（hn-term）
 
@@ -319,8 +322,8 @@ settings.ini / recent.txt 设置与最近文件
 
 ### 6.17 设置与便携模式
 
-- 默认：`%APPDATA%\HurshNote\settings.toml`。
-- exe 同目录存在 `portable.flag` 或 `settings.toml` 时进入便携模式，所有数据写到 exe 同目录。
+- 默认：`%APPDATA%\HurshNote\settings.toml`（serde + `#[serde(default)]`，缺字段取默认值；首次运行时迁移 M1/M2 的 `settings.ini`）。
+- exe 同目录存在 `portable.flag` 时进入便携模式，所有数据写到 exe 同目录的 `data\`；环境变量 `HURSHNOTE_DATA_DIR` 可覆盖（测试用）。
 - 设置变更即时生效，写文件同样走原子替换。
 
 ## 7. 性能预算（每个里程碑都要回归）

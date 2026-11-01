@@ -32,7 +32,11 @@
 - [ ] `SCI_GETMODIFY` 只反映当前文档；非当前文档的修改状态要自己缓存（保存点通知 + 切换时记录）。
 - [ ] Scintilla 的修改历史标记占用 21–24 号、折叠占用 25–31 号，书签用 18 号。
 - [ ] 边栏宽度、光标宽度是像素值，不随 DPI 缩放，要自己乘 DPI/96。
-- [ ] Scintilla 在 `WM_CREATE` 里 `RegisterDragDrop`，需要已 `OleInitialize`；它的拖放目标不接受 CF_HDROP，初始化 OLE 后文件拖到编辑区会失效。
+- [x] Scintilla 在 `WM_CREATE` 里 `RegisterDragDrop`，需要已 `OleInitialize`；它的拖放目标不接受 CF_HDROP，初始化 OLE 后文件拖到编辑区会失效 → `hn_drop.cxx` 撤销它的注册，换成同时接受文件与文字的目标；文件路径交给回调后延后打开（拖放过程中不能弹对话框）。
+- [x] 自写拖放目标处理编辑区内部"移动"文字：插入后要把选区放回原文字（位置按插入偏移），Scintilla 在 `DoDragDrop` 返回后删除选区，从而完成移动。
+- [x] 两个视图共享文档时，`SCN_SAVEPOINTLEFT/REACHED`、`SC_UPDATE_CONTENT` 会从两个视图各发一次 → 按发出通知的视图找对应文档，非焦点视图只更新显示相关的状态。
+- [x] `SCI_SETDOCPOINTER(0)` 会给视图新建一个空文档 → 取消分屏时用它释放第二个视图对文档的引用。
+- [x] 激活文档可能把焦点移到另一视图，之前取到的 `sci` 就过期了 → 调用 `activate` 之后重新取 `self.sci()`。
 - [ ] `SCN_CHARADDED` 在 CRLF 模式下按 `\r`、`\n` 各发一次，换行后的处理只在 `\n` 时做（CR 模式在 `\r`）。
 
 ## 编码
@@ -122,10 +126,17 @@
 
 ## 侧边栏 / 系统图标
 
-- [ ] `SHGetFileInfoW` 需要 COM 初始化；对网络路径会阻塞 → 用 `SHGFI_USEFILEATTRIBUTES` 只按扩展名取，必须读文件的在后台 STA 线程取。
-- [ ] 系统图像列表要按 DPI 取合适尺寸（`SHGetImageList` + `SHIL_SMALL`/`SHIL_LARGE`）。
-- [ ] TreeView 一次插入上万个节点很慢 → 懒加载，展开时才枚举。
-- [ ] 工作区目录被删除/重命名 → 文件监控驱动刷新，不崩溃。
+- [x] `SHGetFileInfoW` 需要 COM 初始化；对网络路径会阻塞 → 用 `SHGFI_USEFILEATTRIBUTES` 只按扩展名取（`OleInitialize` 已初始化 COM）。
+- [ ] 系统图像列表要按 DPI 取合适尺寸（`SHGetImageList` + `SHIL_SMALL`/`SHIL_LARGE`）。目前用 `SHGFI_SMALLICON`，高 DPI 下图标偏小。
+- [x] TreeView 一次插入上万个节点很慢 → 懒加载，展开时才枚举，单个目录最多 1 万项。
+- [x] 工作区目录被删除/重命名 → 回到前台时同步，路径不存在的节点由上一级删除，不崩溃。
+- [x] 系统图像列表是共享的，不能销毁 → ListView 用 `LVS_SHAREIMAGELISTS`；TreeView 本来就不销毁 `TVSIL_NORMAL`。
+- [x] `TVINSERTSTRUCTW` 里的 item 是 `TVITEMEXW` / `TVITEMW` 的联合，自己声明时按较大的 `TVITEMEXW` 补齐。
+- [x] `NMLVKEYDOWN` / `NMTVKEYDOWN` 在 commctrl.h 中按 1 字节对齐（`#include <pshpack1.h>`），Rust 声明要 `#[repr(C, packed(1))]`。
+- [x] 虚拟 ListView 程序设置选中项也会发 `LVN_ITEMCHANGED` → 用一个"抑制"标志区分用户操作；`LVM_SETITEMCOUNT` 传 `LVSICF_NOSCROLL` 避免每次刷新都滚动。
+- [x] TreeView 的 `NM_RCLICK` 返回非零才不会再发 `WM_CONTEXTMENU`；ListView 的右键菜单改在 `WM_CONTEXTMENU` 里做（键盘 Shift+F10 时 `lParam == -1`，用选中项）。
+- [x] 加速键表在 `TranslateAcceleratorW` 阶段就吃掉按键 → 焦点在侧边栏或快速打开时，不带 Ctrl 的键跳过加速键（F2 重命名、Del 删除、F5 刷新）。
+- [x] Ctrl+Tab 切换器要在 Ctrl 松开时提交，而 `WM_KEYUP` 发给的是焦点窗口（编辑器）→ 在消息循环里统一预处理；切换列表用 `WS_EX_NOACTIVATE` 弹出，焦点留在编辑器。
 
 ## 加密
 
@@ -151,6 +162,9 @@
 
 - [ ] 部分函数受多个特性控制：`CreateMutexW` 还需要 `Win32_Security`；`MessageBeep` 在 `Win32_System_Diagnostics_Debug` 而不是 `WindowsAndMessaging`。编译报"找不到"时先查特性。
 - [ ] pcre2 crate 的 `disable_utf_check` 已废弃（新版 PCRE2 不再重复校验）。
+- [x] `SHBrowseForFolderW`、`BROWSEINFOW` 需要 `Win32_UI_Shell_Common`（`ITEMIDLIST`）；`SystemParametersInfoForDpi` 在 `Win32_UI_HiDpi`；`CoTaskMemFree` 在 `Win32_System_Com`；`OleInitialize` 在 `Win32_System_Ole`。
+- [x] 自己声明的 Win32 结构体名（`NMHDR`、`TVITEMW`……）会触发 clippy `upper_case_acronyms` → 模块级 `allow`。
+- [x] `unsafe { f() } < 0` 会被解析成泛型参数 → 先绑定到变量再比较。
 
 ## 发布
 
