@@ -331,6 +331,10 @@ impl App {
         let (mut n_files, mut n_matches) = (0usize, 0usize);
         let mut problems: Vec<(PathBuf, String)> = Vec::new();
         for f in files {
+            // 文档路径是规范化的长路径；遍历得到的路径可能含 8.3 短名（如 RUNNER~1），先规范化再比较
+            let canon = std::fs::canonicalize(&f.path)
+                .map(|p| crate::fsio::strip_verbatim(&p))
+                .unwrap_or_else(|_| f.path.clone());
             let open = self
                 .docs
                 .borrow()
@@ -338,7 +342,7 @@ impl App {
                 .find(|d| {
                     d.path
                         .as_deref()
-                        .is_some_and(|p| config::same_path(p, &f.path))
+                        .is_some_and(|p| config::same_path(p, &canon))
                 })
                 .map(|d| (d.id, d.is_large));
             match open {
