@@ -784,6 +784,51 @@ fn dev_checks(app: &App, dir: &std::path::Path, check: &mut dyn FnMut(&str, bool
         }
         None => check("terminal", false, "spawn failed"),
     }
+
+    // PowerShell：PSReadLine 补全、彩色输出、中文输入输出
+    match app.st_new_terminal("powershell") {
+        Some(id) => {
+            let v = crate::term::view(id);
+            let started = v
+                .as_ref()
+                .is_some_and(|v| wait_until(30_000, || v.text().contains("PS ")));
+            crate::term::write(id, b"Write-Host -ForegroundColor Red hn-red\r".to_vec());
+            let red = v.as_ref().is_some_and(|v| {
+                wait_until(10_000, || {
+                    let snap = v.terminal().snapshot();
+                    (0..snap.size.rows).any(|r| {
+                        snap.row_text(r) == "hn-red"
+                            && snap.cell(r, 0).fg != hn_term::palette::Palette::default().fg
+                    })
+                })
+            });
+            crate::term::write(id, b"Get-ChildIt\t".to_vec());
+            let completed = v
+                .as_ref()
+                .is_some_and(|v| wait_until(10_000, || v.text().contains("Get-ChildItem")));
+            // Esc 清掉补全后的输入行，再输出中文
+            crate::term::write(id, "\x1becho 中文hn\r".as_bytes().to_vec());
+            let chinese = v
+                .as_ref()
+                .is_some_and(|v| wait_until(10_000, || v.text().matches("中文hn").count() >= 2));
+            let text = v.as_ref().map(|v| v.text()).unwrap_or_default();
+            crate::term::write(id, b"exit\r".to_vec());
+            let exited = v
+                .as_ref()
+                .is_some_and(|v| wait_until(10_000, || v.exited()));
+            check(
+                "terminal_powershell",
+                started && red && completed && chinese && exited,
+                &format!(
+                    "started={started} red={red} completed={completed} chinese={chinese} exited={exited} text={:?}",
+                    text.lines().rev().take(6).collect::<Vec<_>>()
+                ),
+            );
+            drop(v);
+            app.st_close_terminal(id);
+        }
+        None => check("terminal_powershell", false, "spawn failed"),
+    }
 }
 
 /// `--selftest-large <文件> <输出>`：大文件视图性能测试（CI 用 5 GB 日志）。
