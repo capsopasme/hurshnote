@@ -203,6 +203,8 @@ impl Terminal {
             sender: Arc::new(Mutex::new(None)),
         };
         let term = Arc::new(FairMutex::new(new_term(size, listener.clone())));
+        // Windows 上还有 escape_args 字段
+        #[allow(clippy::needless_update)]
         let pty_opts = tty::Options {
             shell: Some(tty::Shell::new(opts.program.clone(), opts.args.clone())),
             working_directory: opts.cwd.clone(),

@@ -195,7 +195,7 @@ pub fn spawn(spec: &Spec, sink: Sink) -> io::Result<Running> {
         use std::os::windows::io::AsRawHandle;
         let j = job::Job::new();
         if let Some(j) = &j {
-            j.assign(child.as_raw_handle() as *mut std::ffi::c_void);
+            j.assign(child.as_raw_handle());
         }
         j
     };
