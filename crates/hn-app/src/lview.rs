@@ -1010,7 +1010,7 @@ impl LargeView {
         let caret_row = nav.row_start(d.caret);
         let mut line = d.index.line_of(d.top, &d.reader);
         let dec = legacy_fn(d.legacy());
-        let legacy: Option<&dyn Fn(&[u8]) -> String> = if d.legacy().is_some() {
+        let legacy: Option<decode::LegacyDecode> = if d.legacy().is_some() {
             Some(&dec)
         } else {
             None
@@ -1507,7 +1507,7 @@ impl LargeView {
             .reader
             .read(row.start, (row.content_end - row.start) as usize);
         let dec = legacy_fn(d.legacy());
-        let legacy: Option<&dyn Fn(&[u8]) -> String> = if d.legacy().is_some() {
+        let legacy: Option<decode::LegacyDecode> = if d.legacy().is_some() {
             Some(&dec)
         } else {
             None
@@ -1527,7 +1527,7 @@ impl LargeView {
             .reader
             .read(row.start, (row.content_end - row.start) as usize);
         let dec = legacy_fn(d.legacy());
-        let legacy: Option<&dyn Fn(&[u8]) -> String> = if d.legacy().is_some() {
+        let legacy: Option<decode::LegacyDecode> = if d.legacy().is_some() {
             Some(&dec)
         } else {
             None

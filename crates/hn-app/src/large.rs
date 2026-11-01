@@ -144,7 +144,7 @@ fn each_match(
     searcher: &Searcher,
     data: &[u8],
     cs: Charset,
-    legacy: Option<&dyn Fn(&[u8]) -> String>,
+    legacy: Option<decode::LegacyDecode>,
     f: &mut dyn FnMut(usize, usize) -> bool,
 ) -> Result<bool, String> {
     if cs == Charset::Utf8 {
@@ -169,7 +169,7 @@ fn each_match(
 }
 
 /// 匹配所在行的预览文字。
-fn preview(data: &[u8], s: usize, cs: Charset, legacy: Option<&dyn Fn(&[u8]) -> String>) -> String {
+fn preview(data: &[u8], s: usize, cs: Charset, legacy: Option<decode::LegacyDecode>) -> String {
     let unit = cs.unit() as usize;
     let ls = cs.rfind_lf(&data[..s]).map(|i| i + unit).unwrap_or(0);
     let mut le = cs.find_lf(&data[s..]).map(|i| s + i).unwrap_or(data.len());
@@ -190,7 +190,7 @@ struct Ctx<'a> {
     searcher: &'a Searcher,
     src: &'a dyn ByteSource,
     cs: Charset,
-    legacy: Option<&'a dyn Fn(&[u8]) -> String>,
+    legacy: Option<decode::LegacyDecode<'a>>,
     cancel: &'a AtomicBool,
     send: &'a dyn Fn(SearchEvent),
 }
@@ -350,7 +350,7 @@ fn run_search(job: SearchJob, tx: Sender<LargeMsg>, hwnd: isize) {
             None => "\u{FFFD}".into(),
         }
     };
-    let legacy: Option<&dyn Fn(&[u8]) -> String> = if legacy_enc.is_some() {
+    let legacy: Option<decode::LegacyDecode> = if legacy_enc.is_some() {
         Some(&dec)
     } else {
         None
