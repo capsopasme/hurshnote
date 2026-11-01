@@ -17,6 +17,8 @@ hn-crypto = { path = "crates/hn-crypto" }
 hn-core = { path = "crates/hn-core" }
 hn-large = { path = "crates/hn-large" }
 hn-render = { path = "crates/hn-render" }
+hn-run = { path = "crates/hn-run" }
+hn-term = { path = "crates/hn-term" }
 windows-sys = "0.59"
 # 只用于 COM 接口（Direct2D / DirectWrite），普通 Win32 API 用 windows-sys
 windows = "0.58"

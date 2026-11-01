@@ -1,6 +1,6 @@
 [package]
 name = "hn-search"
-description = "HurshNote 查找替换引擎（PCRE2，跨平台）"
+description = "HurshNote 查找替换引擎与目录搜索（PCRE2 + ignore，跨平台）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 pcre2.workspace = true
+hn-text.workspace = true
+ignore.workspace = true
 
 [lints]
 workspace = true

@@ -7,6 +7,8 @@
 //!
 //! 输入文本必须是合法 UTF-8（接口使用 `&str` 保证这一点）。
 
+pub mod dir;
+
 use std::fmt;
 use std::ops::Range;
 

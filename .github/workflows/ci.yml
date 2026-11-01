@@ -30,10 +30,10 @@ jobs:
         run: python3 scripts/ci_run.py 格式检查 -- cargo fmt --all --check
 
       - name: Clippy
-        run: python3 scripts/ci_run.py Clippy -- cargo clippy -p hn-text -p hn-search -p hn-crypto -p hn-core -p hn-large --all-targets -- -D warnings
+        run: python3 scripts/ci_run.py Clippy -- cargo clippy -p hn-text -p hn-search -p hn-crypto -p hn-core -p hn-large -p hn-run -p hn-term --all-targets -- -D warnings
 
       - name: 测试
-        run: python3 scripts/ci_run.py 测试 -- cargo test -p hn-text -p hn-search -p hn-crypto -p hn-core -p hn-large
+        run: python3 scripts/ci_run.py 测试 -- cargo test -p hn-text -p hn-search -p hn-crypto -p hn-core -p hn-large -p hn-run -p hn-term
 
   windows:
     runs-on: windows-latest

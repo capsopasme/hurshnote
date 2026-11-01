@@ -1,0 +1,12 @@
+[package]
+name = "hn-run"
+description = "HurshNote 运行 Python：解释器探测、子进程与输出流、Traceback 与 ANSI 颜色解析（跨平台，Windows 上用 Job Object 管理进程树）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
