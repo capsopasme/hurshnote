@@ -31,13 +31,13 @@ Notepad++ 的路线（原生 Win32 + Scintilla）启动快、体积小、中文�
 | 层 | 选择 | 备注 |
 |---|---|---|
 | 语言 | Rust stable，`x86_64-pc-windows-msvc`，`rust-toolchain.toml` 固定版本 | Rust 的 MSVC 目标最低要求 Win10，与 1809 底线一致 |
-| Win32 绑定 | `windows-sys`（普通 Win32 API，零开销、签名稳定）；需要 COM（DirectWrite / Direct2D / WIC / Shell）时再引入 `windows` crate | 不引入任何 GUI 框架 |
+| Win32 绑定 | `windows-sys` 0.59（普通 Win32 API，零开销、签名稳定）；COM（Direct2D / DirectWrite，以后的 WIC）用 `windows` 0.58，只在 `hn-render` 中使用 | 不引入任何 GUI 框架 |
 | 编辑内核 | Scintilla 5.x + Lexilla 5.x，源码放在 `third_party/`，用 `cc` crate 以 C++17 编译并**静态链接** | 静态时调用 `Scintilla_RegisterClasses`；lexer 用 `CreateLexer` + `SCI_SETILEXER` |
 | 文本渲染 | Scintilla 用 `SC_TECHNOLOGY_DIRECTWRITE`；自绘视图用 Direct2D + DirectWrite | 高 DPI、彩色 emoji、字体回退 |
 | 编码 | `encoding_rs` + `chardetng` | GB18030 往返无损 |
 | 正则 | `pcre2`（JIT），编辑器内查找与目录搜索共用 | 支持环视、反向引用，行为与 N++ 用户习惯接近 |
 | 目录搜索 | `ignore`（并行遍历 + gitignore）+ `grep-searcher` + `grep-pcre2` | ripgrep 的组件 |
-| 大文件 | `memmap2` + `memchr` | 页访问异常保护见 §6.4 |
+| 大文件 | `hn-large`（只依赖 std）：分块定位读 + 64 KiB 块缓存，**不用内存映射** | 理由见 §6.4 |
 | 终端 | ConPTY 薄封装（自写，参考 `portable-pty`）+ `alacritty_terminal`（VT 状态机）+ 自写 D2D 网格渲染 | |
 | Markdown | `pulldown-cmark`（GFM 表格/任务列表/删除线）+ 自写布局与 D2D 绘制 | |
 | 加密 | `argon2` + `aes-gcm` + `zeroize`，随机数来自 `getrandom`（BCryptGenRandom） | |
@@ -59,7 +59,7 @@ hurshnote/
     hn-sci       Scintilla/Lexilla 编译脚本 + 类型安全封装 + 主题映射表
     hn-core      文档模型、文档管理器、保存流程、会话/快照、文件监控
     hn-text      编码嗅探与转换、EOL 检测与转换、行操作、列表续写、转义解析   ← 纯函数，跨平台可测
-    hn-large     分块读取/mmap、稀疏行索引、大文件搜索、Hex 数据源、Tail       ← 核心逻辑跨平台可测
+    hn-large     分块读取与块缓存、稀疏行索引、显示行、分块遍历、Hex、Tail    ← 只依赖 std，跨平台可测
     hn-search    查找替换引擎、目录搜索                                         ← 跨平台可测
     hn-crypto    加密文件格式读写                                               ← 跨平台可测
     hn-md        Markdown → 布局树（与平台无关）；绘制在 hn-app
@@ -69,6 +69,8 @@ hurshnote/
   tests/corpus/  测试语料（编码、换行、超长行、加密样本……）
   docs/
 ```
+
+**M4 新增：** `hn-large`（字节源与块缓存、稀疏行索引、显示行导航、按行对齐的分块遍历、Hex 行格式、文件状态与变化分类；只依赖 std，Linux 上有完整单元测试）、`hn-render`（Direct2D/DirectWrite 封装），`hn-app` 中的 `lview`（大文件视图窗口与文档状态）以及 `app` 的子模块 `large`（打开、轮询、Tail、Hex 切换、后台搜索、搜索结果面板、状态栏）。`hn-term`、`hn-run`、`hn-md` 尚未创建。
 
 **M2 新增：** `hn-crypto`（加密格式）、`hn-core`（会话清单、快照、文档数据布局、磁盘戳、原子写入；均跨平台），`hn-app` 中的 `fsio`（安全保存与提权）、`watcher`、`crashdump`、`pwdlg`，以及 `app` 的子模块 `persist`（快照与会话）、`files`（保存、加密文件、外部修改）。
 
@@ -118,9 +120,9 @@ struct Document {
 
 ```
 stat(file)
- ├─ size > large_threshold (256MB) ───────────────→ 大文件视图（只读）
- ├─ 前 8KB 含 NUL 且不像 UTF-16 ──────────────────→ 提示：用 Hex 视图打开 / 强制按文本打开
  ├─ 魔数 = HURSHENC ──────────────────────────────→ 输入密码 → 解密 → 编辑器
+ ├─ size > large_threshold (256MB) ───────────────→ 大文件视图（只读）
+ ├─ 前 8KB 含 NUL 且不像 UTF-16 ──────────────────→ 提示：是 = 以 Hex 模式的大文件视图打开 / 否 = 按文本打开 / 取消
  └─ 其他 → 后台读取 + 编码嗅探 + 解码（ILoader）
              └─ 最长行 > long_line_threshold (默认 1 MB) → 关闭折行、lexer、缩进线，状态栏提示
 ```
@@ -147,25 +149,50 @@ stat(file)
 4. 更新 disk_stamp；通知文件监控忽略这次自身写入；删除该文档的快照
 ```
 
-### 6.4 大文件视图（hn-large）
+### 6.4 大文件视图（hn-large + hn-app/lview + app/large）
 
-- **只读**。打开时立即显示第一屏（只需读前几 KB），后台线程用 `memchr` 扫描换行，每 1 MB 记一个检查点（稀疏行索引），进度显示在状态栏；索引完成前滚动条按字节比例估算。
-- 数据访问：静态文件用 `memmap2`，以 `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` 打开。**所有页访问经过一个小的 C 函数包裹 SEH（`__try/__except`）**，捕获 `EXCEPTION_IN_PAGE_ERROR` 后转为错误返回，不让进程崩溃。
-- 编码：只支持 UTF-8 / ANSI / GB18030 / UTF-16 的逐块解码，块边界对齐到字符边界。
-- 搜索：后台按块流式匹配（`grep-searcher` 支持任意 reader），结果进底部列表，点击跳转。
-- 渲染：`hn-render` 自绘，只排版可见行；长行横向截断显示（> 10 000 字符的行显示前段 + "…"）。
-- **Tail 模式**：不使用 mmap。监听文件变化后用 `ReadFile` 从上次偏移读增量；检测到文件变小（被轮转/截断）时从头重读并提示。
+**只读**。打开时只读开头 256 KB 嗅探编码与换行符、文件末尾 4 KB 记录文件状态，然后立即显示第一屏；行索引在后台建立。
+
+**数据访问（`hn_large::source`）：不使用内存映射。** `FileSource` 每次读取都"打开 → 定位读 → 关闭"（Windows 上 std 以读/写/删除共享模式打开），UI 线程通过 `Reader` 读取，按 64 KiB 块缓存最近 128 块（8 MiB）。原计划的 mmap + SEH 方案放弃，原因：
+- 映射存在期间，写日志的程序无法截断或轮转文件（`ERROR_USER_MAPPED_FILE`）；长期持有的句柄会让"删除后重建"式轮转失败（删除挂起期间不能新建同名文件）
+- 文件被外部截断后访问映射页会触发 `EXCEPTION_IN_PAGE_ERROR`，需要 C 写的 SEH 包装；定位读只会读到更少的字节
+- 网络盘上 mmap 性能差、断网即异常
+- 视图每次只需要几十 KB，顺序扫描用 4 MiB 的块读，与 mmap 没有可感知的差距（CI 上 5 GB 日志约 5 秒建完索引）
+
+**行索引（`hn_large::index`）**：按文件绝对偏移每 64 KiB 一块，记录"到该块末尾为止的 LF 总数"（5 GB 约 8 万项、640 KB）。偏移 → 行号、行号 → 偏移都只需在索引之外再扫描不超过一块。后台线程顺序读文件、每 100 ms 发一批结果（以后台 I/O 优先级运行，不和界面读取抢磁盘）；文件增长时从最后一个完整块继续。行以 LF 结尾（CRLF 视为一个换行），单独的 CR 不算换行；UTF-16 的 LF 必须位于偶数偏移。
+
+**显示行（`hn_large::rows`）**：以"显示行"为单位滚动。不超过 2048 字节的行占一个显示行；更长的行在按绝对偏移划分的网格点（`data_start + k × 2048`，再对齐到字符边界：跳过 UTF-8 续字节、UTF-16 低代理项）处折开。任意偏移所在显示行的起点只需向前、向后各扫描不超过 4 KB 就能确定，与索引是否建好无关，100 MB 的单行 JSON 也不会卡。随机测试检查"从头遍历每一行、任意位置求行首、反向求上一行"三者一致。
+
+**滚动**：顶部位置是一个字节偏移（显示行起点）。滚动条按字节比例映射（0..65535），拖动时按比例定位后对齐到显示行起点；最后一行最多滚到窗口底部。行号栏显示逻辑行号：顶部行号 = 索引中该偏移之前的 LF 数（索引未扫描到时不显示行号）。
+
+**绘制（`lview`）**：每个编辑视图上叠放一个自绘子窗口，显示该视图文档的 `LargeDoc` 时盖住 Scintilla（Scintilla 中挂一个空的只读文档占位，焦点经子类化转给大文件视图）。每帧只排版可见的显示行：读字节 → `hn_large::decode` 解码为 UTF-16 并记录每个码元的源字节偏移 → DirectWrite 单行排版；命中测试与选区高亮都通过偏移表在字节与码元之间换算。控制字符显示为 Unicode 控制图形。
+
+**编码**：嗅探与普通文档相同（`hn_text::encoding::detect`）；按编码族（UTF-8 / UTF-16 LE/BE / GB18030 / 双字节 / Shift_JIS / EUC-JP / 单字节）判断字符边界。所有 ASCII 兼容编码中 0x0A 都不会出现在多字节字符内部，因此按字节找 LF 是安全的。"重新打开为"改变解读方式并重建索引。
+
+**选中与复制**：光标、选区都是字节偏移，键盘/鼠标操作与普通编辑器一致（方向键、PgUp/PgDn、Home/End、Ctrl+Home/End、Shift 扩展、双击选词、拖动时自动滚动）。复制按当前编码解码，上限 64 MB。
+
+**搜索（`app/large` + `hn_large::search`）**：后台线程按约 4 MiB、切在换行之后的块流式匹配（正向/反向两种遍历）。UTF-8 块整块交给 PCRE2；其他编码或含无效字节的块逐行解码（带偏移表）后匹配，再把位置换回源字节偏移。查找下一个/上一个（可绕回）、计数、"标记全部"（结果进搜索结果面板，最多列 10 万条，计数不受限）；Esc 取消；新搜索取消旧搜索；结果按代号丢弃过期批次。跨行匹配不保证（块边界处）。
+
+**搜索结果面板**：主窗口底部的虚拟 ListView（行号 | 内容预览），双击或回车跳转，F7 显示/隐藏，Esc 隐藏。M5 的底部抽屉会接管它。
+
+**Tail 与文件变化（`hn_large::tail`）**：每 0.5 秒对每个大文件"打开 → 取文件标识（Windows 文件索引号）、长度、修改时间与末尾 4 KB 哈希 → 关闭"：
+- 长度变大且旧末尾哈希不变：增长 → 失效最后一个缓存块、从最后一个完整块继续建索引；Tail 时光标与视图跟到末尾；非 Tail 时提示一次"可开启 Tail"
+- 文件标识变化：被替换（轮转）；长度变小：被截断；长度或修改时间变化但旧末尾哈希不同：被改写 → 清空缓存与索引、重新读取，提示用户
+- 不存在：标记"磁盘上已删除"，重新出现时按"被替换"处理
+
+不用创建时间判断替换：Windows 的文件系统隧道会让 15 秒内同名重建的文件继承旧的创建时间。
+
+普通文档（已保存、未修改、未加密）开启 Tail 时改用大文件视图显示（Scintilla 内容设为只读保留）；关闭 Tail 且文件不超过阈值时回到编辑器并重新载入。
+
+**会话**：大文件文档在清单中记 `large`、`hex`、`tail`、`offset`（光标字节偏移），恢复时同样懒加载；不写快照。大文件文档不加入文件监控（监控需要读全文算哈希），由上面的轮询负责。
 
 ### 6.5 Hex 视图
 
-- 数据源抽象：
-  ```rust
-  trait ByteSource { fn len(&self) -> u64; fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<usize>; }
-  ```
-  实现：`MmapSource`（磁盘文件）、`BufferSource`（编辑中的文档按当前编码编码后的字节快照）。
-- 固定 16 字节一行、虚拟滚动，只读取可见范围。列：偏移 | 16 字节 Hex | ASCII/当前编码解码。
-- 光标在文本视图与 Hex 视图间切换时换算字节偏移，切换后定位不丢失。
-- v1 只读；覆盖式 Hex 编辑放到 v1 之后。
+- 数据源 `hn_large::ByteSource`：`FileSource`（磁盘文件，大文件文档）、`MemSource`（普通文档按当前编码编码后的字节快照）。
+- 固定 16 字节一行、虚拟滚动，只读取可见范围。列：偏移（至少 8 位十六进制，按文件长度加宽）| 16 字节 Hex（第 8 字节后多一个空格）| 可打印 ASCII（其他字节显示为 `.`，保证列对齐）。
+- 大文件文档在文本/Hex 两种模式间切换（Ctrl+Shift+H），共用同一个光标字节偏移，切换后定位不丢失。
+- 普通文档按 Ctrl+Shift+H 生成编码后的快照（含 BOM）显示；光标位置按"编码光标之前的文本"的长度换算，切回时按"解码光标之前的字节"的长度换回。快照显示期间编辑类命令被拦截；文档被重新载入时快照作废。
+- Hex 模式下复制得到空格分隔的十六进制字节。v1 只读；覆盖式 Hex 编辑放到 v1 之后。
 
 ### 6.6 快照与会话恢复（hn-core）
 
@@ -199,7 +226,7 @@ settings.ini / recent.txt 设置与最近文件
 - 未修改的文档默认静默重新载入（可关），已修改的询问；不重新载入时记住新戳，不再为同一版本提示。
 - 文件被删除：标题显示"磁盘上已删除"，保留缓冲区。
 - 窗口不在前台时事件先积累，`WM_ACTIVATE` 后再处理。
-- Tail 模式（M4）需要更短的间隔，届时为单个文件单独计时。
+- 大文件文档不在这里监控（算哈希要读整个文件），改由大文件视图每 0.5 秒轮询（§6.4）。
 
 ### 6.8 查找替换（hn-search）
 
@@ -315,12 +342,20 @@ settings.ini / recent.txt 设置与最近文件
 - 滚动同步：块树记录源码行号，编辑器滚动时预览跟随，反之亦然。
 - 预览中选中文本复制：M6 内实现基础版（按块选择）。
 
-### 6.16 单实例与命令行
+### 6.16 共享渲染设施（hn-render）
+
+- 只在 UI 线程使用：`ID2D1Factory`、`IDWriteFactory` 按线程缓存；渲染目标是窗口的 `ID2D1HwndRenderTarget`，DPI 固定设为 96，坐标一律用物理像素，字号由调用方按 DPI 换算。
+- `Surface`：渲染目标 + 一个纯色画刷（填充、线、文字、单行排版、裁剪）；`EndDraw` 返回 `D2DERR_RECREATE_TARGET` 时调用方丢弃重建。
+- `Font`：文本格式与度量。用含中文的样本测行高与基线后设为**统一行距**，保证中英文混排时各行基线一致；`char_w` 为 "0" 的宽度（Hex 列、行号栏按它对齐）；制表位为 4 个字符宽。
+- `TextLayout`：单行排版（不折行），提供命中测试（横坐标 ↔ UTF-16 位置）。
+- 首次创建字体约 0.5 ms、渲染目标约 5 ms（CI 机器），不影响首屏预算。终端（M5）与 Markdown 预览（M6）沿用。
+
+### 6.17 单实例与命令行
 
 - 命名互斥量 `Local\HurshNote-{用户SID}`；已存在时找到主窗口，用 `WM_COPYDATA` 发送参数（JSON），然后退出。
-- 参数：`<files...>`、`-n<行>`、`-c<列>`、`-ro`、`-multiInst`、`-nosession`、`--elevated-save`（内部）。
+- 参数：`<files...>`、`-n<行>`、`-c<列>`、`-ro`、`-multiInst`、`-nosession`、`--elevated-save`（内部）；测试用 `--selftest <输出>`、`--selftest-large <文件> <输出>`、`--selftest-session <阶段> <标记> <输出>`。
 
-### 6.17 设置与便携模式
+### 6.18 设置与便携模式
 
 - 默认：`%APPDATA%\HurshNote\settings.toml`（serde + `#[serde(default)]`，缺字段取默认值；首次运行时迁移 M1/M2 的 `settings.ini`）。
 - exe 同目录存在 `portable.flag` 时进入便携模式，所有数据写到 exe 同目录的 `data\`；环境变量 `HURSHNOTE_DATA_DIR` 可覆盖（测试用）。
@@ -341,7 +376,8 @@ settings.ini / recent.txt 设置与最近文件
 
 ## 8. 测试策略
 
-- **单元测试**：`hn-text`、`hn-search`、`hn-crypto`、`hn-large`、`hn-md` 在 Linux 和 Windows CI 上都跑。
+- **单元测试**：`hn-text`、`hn-search`、`hn-crypto`、`hn-core`、`hn-large`（以后的 `hn-md`）在 Linux 和 Windows CI 上都跑。
+- **大文件性能测试**：CI 生成 5 GB 日志（`scripts/gen_big_log.py`，生成后 fsync），用 `--selftest-large` 测首屏、跳到中间/末尾、连续翻页、建索引、跳转到中间行的耗时。
 - **属性测试**（`proptest`）：编码往返、EOL 转换、行操作的不变式（排序后行集合不变、去重幂等）。
 - **模糊测试**（`cargo-fuzz`）：加密文件头解析、编码嗅探、Markdown 解析到布局、行索引。
 - **集成自测**：exe 内置隐藏的 `--selftest <脚本>` 模式，在真实窗口中执行脚本化操作（打开、编辑、保存、切换编码）并以退出码报告结果，在 Windows CI 上运行。

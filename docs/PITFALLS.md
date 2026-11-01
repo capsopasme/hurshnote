@@ -87,14 +87,24 @@
 - [ ] 文件被删除：标记为"磁盘上已删除"，保留缓冲区，不要关闭文档。
 - [ ] 窗口失去焦点期间的多次变化合并为一次提示，回到前台时再弹。
 
-## 大文件 / mmap / Hex
+## 大文件 / Hex / Tail
 
-- [ ] 映射期间外部截断 → 页访问抛 `EXCEPTION_IN_PAGE_ERROR` → SEH 包裹。
-- [ ] 映射会阻止其他进程截断/轮转文件 → Tail 不用 mmap；大文件视图打开活跃日志时提示"建议用 Tail 模式"。
-- [ ] 网络盘上的 mmap 性能差且断网即异常 → 网络路径改用分块 `ReadFile`。
-- [ ] 行索引构建时 UI 不能等待 → 先按字节比例估算滚动条，索引逐步完善。
-- [ ] 多字节编码的块边界可能切断字符 → 解码前对齐到字符边界（UTF-8 回退到起始字节；GB18030 从已知行首解码）。
-- [ ] 32 位偏移溢出 → 一律 `u64`。
+- [x] 映射期间外部截断 → 页访问抛 `EXCEPTION_IN_PAGE_ERROR` → **不用 mmap**，改为分块定位读，截断只会读到更少的字节。
+- [x] 映射或长期持有的句柄会阻止轮转：映射阻止截断；即使以 `FILE_SHARE_DELETE` 打开，删除也会挂起到句柄关闭，期间无法新建同名文件 → 每次读取、每次轮询都"打开 → 读 → 关闭"。
+- [x] 判断文件被替换不能用创建时间：Windows 文件系统隧道让 15 秒内同名重建的文件继承旧的创建时间 → 用文件索引号（`GetFileInformationByHandle`）。
+- [x] 长度变大不一定是追加（可能被整体改写成更长的内容）→ 比较旧末尾 4 KB 的哈希。
+- [x] 网络盘上的 mmap 性能差且断网即异常 → 同上，不用 mmap。
+- [x] 行索引构建时 UI 不能等待 → 滚动条按字节比例，行号只在索引扫描到之后显示；跳转到行时提示索引进度。
+- [x] 后台顺序扫描与界面的随机读取抢磁盘 → 索引线程设为后台 I/O 优先级（`THREAD_MODE_BACKGROUND_BEGIN`）。
+- [x] 多字节编码的块边界可能切断字符 → 网格点对齐到字符边界（UTF-8 跳过续字节、UTF-16 跳过低代理项）；GB18030 等无法从任意位置判断边界，只在超过 2 KB 的超长行折行处可能错一个字符。
+- [x] 超长单行（100 MB JSON）不能为了找行首向前扫描整行 → 超过 2048 字节的行按绝对偏移网格折成多个显示行，任何位置只需扫描不超过 4 KB。
+- [x] UTF-16 的 LF 是偶数偏移上的 `0A 00`（LE）；奇数偏移上的 `00 0A` 不是换行。
+- [x] 32 位偏移溢出 → 一律 `u64`；滚动条范围固定 0..65535，按比例映射。
+- [x] 被盖住的 Scintilla 仍会收到焦点（`SetFocus(sci)` 散布在各处）→ 子类化 `WM_SETFOCUS` 转给大文件视图，否则键入会进入隐藏的文档。
+- [x] `SetScrollInfo` 改变滚动条显隐时会同步发 `WM_SIZE` → 用 `SIF_DISABLENOSCROLL` 让滚动条常驻，并且调用前释放 `LargeDoc` 的借用。
+- [x] 大文件视图的焦点变化不能同步切换编辑视图（会在 `sync_overlays` 中途重入）→ `PostMessage(WM_APP_FOCUS_VIEW)`。
+- [x] 中英文混排时 DirectWrite 每行高度、基线不同 → 文本格式设统一行距（用含中文的样本测出行高与基线）。
+- [x] CI 刚写完 5 GB 文件就测随机读，后台写回把延迟拖到几百毫秒 → 生成后先 fsync。
 
 ## 搜索
 
@@ -160,6 +170,10 @@
 - [ ] `SHELLEXECUTEINFOW` 需要 `Win32_System_Registry` 特性（字段含 HKEY）；`CreateFileW` 需要 `Win32_Security`。
 - [ ] `SetUnhandledExceptionFilter` 与 `MiniDumpWriteDump` 的类型牵涉大量特性，直接自己声明（kernel32 链接 + dbghelp 动态加载）更省事。
 
+- [x] windows 0.58：`ID2D1RenderTarget::CreateSolidColorBrush` 需要 `Foundation_Numerics` 特性（画刷属性含 Matrix3x2），其他常用绘制方法只要 `Win32_Graphics_Direct2D_Common`。
+- [x] windows 0.58 的 `HWND` 是 `HWND(*mut c_void)`，windows-sys 0.59 是 `*mut c_void`，跨 crate 传递时用 `HWND(raw)` 包装。
+- [x] `Option<&dyn Fn(&[u8]) -> String>` 会触发 clippy `type_complexity` → 用类型别名（`hn_large::decode::LegacyDecode`）。
+- [x] 不要在自测函数里把两个 crate 的同名类型（`hn_search::Mode` 与 `lview::Mode`）同时 `use` 进来。
 - [ ] 部分函数受多个特性控制：`CreateMutexW` 还需要 `Win32_Security`；`MessageBeep` 在 `Win32_System_Diagnostics_Debug` 而不是 `WindowsAndMessaging`。编译报"找不到"时先查特性。
 - [ ] pcre2 crate 的 `disable_utf_check` 已废弃（新版 PCRE2 不再重复校验）。
 - [x] `SHBrowseForFolderW`、`BROWSEINFOW` 需要 `Win32_UI_Shell_Common`（`ITEMIDLIST`）；`SystemParametersInfoForDpi` 在 `Win32_UI_HiDpi`；`CoTaskMemFree` 在 `Win32_System_Com`；`OleInitialize` 在 `Win32_System_Ole`。
