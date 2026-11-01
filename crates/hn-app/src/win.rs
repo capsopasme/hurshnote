@@ -39,7 +39,7 @@ pub const EM_SETSEL: u32 = 0x00B1;
 pub const SB_SETPARTS: u32 = WM_USER + 4;
 pub const SB_SETTEXTW: u32 = WM_USER + 11;
 pub const SBARS_SIZEGRIP: u32 = 0x0100;
-pub const NM_CLICK: u32 = 0xFFFF_FFFE; // (UINT)-2
+pub use crate::ctl::NM_CLICK;
 pub const ICC_BAR_CLASSES: u32 = 0x0004;
 pub const ICC_STANDARD_CLASSES: u32 = 0x4000;
 pub const IDOK: i32 = 1;

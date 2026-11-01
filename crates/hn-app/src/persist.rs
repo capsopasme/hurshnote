@@ -252,6 +252,13 @@ impl App {
                 disk: d.disk,
             });
         }
+        out.split = self.split.get();
+        out.split_ratio = self.split_ratio.get();
+        out.focus = self.focus.get();
+        if let Some((o, _)) = self.other_view() {
+            let oid = self.view_doc[o].get();
+            out.view2 = docs.iter().position(|d| d.id == oid);
+        }
         out
     }
 
@@ -328,6 +335,17 @@ impl App {
         if let Some(p) = initial {
             if self.active.get() != p {
                 self.close_doc_unchecked(p);
+            }
+        }
+        // 分屏：另一视图显示 view2
+        if session.split != 0 {
+            if let Some(oid) = session.view2.and_then(|i| ids.get(i).copied()) {
+                self.split_ratio.set(session.split_ratio);
+                self.set_split(session.split);
+                let focus = session.focus.min(1);
+                self.focus_view(1 - focus);
+                self.activate_here(oid);
+                self.focus_view(focus);
             }
         }
         true

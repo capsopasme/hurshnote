@@ -13,6 +13,8 @@ mod crash;
 #[cfg(windows)]
 mod crashdump;
 #[cfg(windows)]
+mod ctl;
+#[cfg(windows)]
 mod dialogs;
 #[cfg(windows)]
 mod dlg;

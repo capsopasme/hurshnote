@@ -14,14 +14,14 @@ pub const VERSION: u32 = 1;
 #[serde(default)]
 pub struct Session {
     pub version: u32,
-    /// 当前文档在 `docs` 中的下标
+    /// 当前文档（焦点视图中的文档）在 `docs` 中的下标
     pub active: usize,
     pub docs: Vec<SessionDoc>,
     /// 分屏：0 不分屏，1 左右，2 上下
     pub split: u8,
     /// 第一个视图所占比例
     pub split_ratio: f32,
-    /// 第二个视图显示的文档下标
+    /// 另一个（非焦点）视图显示的文档下标
     pub view2: Option<usize>,
     /// 获得焦点的视图（0 或 1）
     pub focus: usize,

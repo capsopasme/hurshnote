@@ -216,9 +216,11 @@ mod tests {
 
     #[test]
     fn toml_roundtrip() {
-        let mut s = Settings::default();
-        s.window = Some((1, 2, 300, 400));
-        s.workspace = vec![PathBuf::from(r"C:\项目")];
+        let s = Settings {
+            window: Some((1, 2, 300, 400)),
+            workspace: vec![PathBuf::from(r"C:\项目")],
+            ..Default::default()
+        };
         let t = toml::to_string_pretty(&s).unwrap();
         let back: Settings = toml::from_str(&t).unwrap();
         assert_eq!(back.window, s.window);

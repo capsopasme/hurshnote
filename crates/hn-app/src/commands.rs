@@ -21,6 +21,9 @@ pub const IDM_RECENT_CLEAR: u16 = 1009;
 pub const IDM_FILE_SAVE_ENCRYPTED: u16 = 1010;
 pub const IDM_SET_SNAPSHOTS: u16 = 1011;
 pub const IDM_SET_AUTO_RELOAD: u16 = 1012;
+pub const IDM_FILE_QUICK_OPEN: u16 = 1013;
+pub const IDM_WS_ADD: u16 = 1014;
+pub const IDM_SET_GITIGNORE: u16 = 1015;
 
 // ---- 编辑 ----
 pub const IDM_EDIT_UNDO: u16 = 1101;
@@ -87,11 +90,33 @@ pub const IDM_VIEW_ZOOM_OUT: u16 = 1607;
 pub const IDM_VIEW_ZOOM_RESET: u16 = 1608;
 pub const IDM_VIEW_FOLD_ALL: u16 = 1609;
 pub const IDM_VIEW_UNFOLD_ALL: u16 = 1610;
+pub const IDM_VIEW_SIDEBAR: u16 = 1611;
+pub const IDM_VIEW_SPLIT_NONE: u16 = 1612;
+pub const IDM_VIEW_SPLIT_H: u16 = 1613;
+pub const IDM_VIEW_SPLIT_V: u16 = 1614;
+pub const IDM_VIEW_SWITCH_FOCUS: u16 = 1615;
+pub const IDM_VIEW_MOVE_OTHER: u16 = 1616;
 
 // ---- 窗口 / 帮助 ----
 pub const IDM_WIN_NEXT: u16 = 1701;
 pub const IDM_WIN_PREV: u16 = 1702;
 pub const IDM_HELP_ABOUT: u16 = 1901;
+
+// ---- 侧边栏右键菜单 ----
+pub const IDM_CTX_CLOSE: u16 = 4001;
+pub const IDM_CTX_CLOSE_OTHERS: u16 = 4002;
+pub const IDM_CTX_COPY_PATH: u16 = 4003;
+pub const IDM_CTX_COPY_NAME: u16 = 4004;
+pub const IDM_CTX_REVEAL: u16 = 4005;
+pub const IDM_TREE_OPEN: u16 = 4101;
+pub const IDM_TREE_NEW_FILE: u16 = 4102;
+pub const IDM_TREE_NEW_DIR: u16 = 4103;
+pub const IDM_TREE_RENAME: u16 = 4104;
+pub const IDM_TREE_DELETE: u16 = 4105;
+pub const IDM_TREE_COPY_PATH: u16 = 4106;
+pub const IDM_TREE_REVEAL: u16 = 4107;
+pub const IDM_TREE_REFRESH: u16 = 4108;
+pub const IDM_TREE_REMOVE_ROOT: u16 = 4109;
 
 // ---- 动态范围 ----
 pub const IDM_ENC_REOPEN_BASE: u16 = 2000;
@@ -109,6 +134,9 @@ pub const ZOOM_PRESETS: &[u32] = &[50, 75, 90, 100, 110, 125, 150, 175, 200, 250
 // ---- 快捷键 ----
 
 const VK_TAB: u16 = 0x09;
+const VK_PRIOR: u16 = 0x21;
+const VK_NEXT: u16 = 0x22;
+const VK_F6: u16 = 0x75;
 const VK_UP: u16 = 0x26;
 const VK_DOWN: u16 = 0x28;
 const VK_ADD: u16 = 0x6B;
@@ -157,6 +185,7 @@ const fn ch(c: u8) -> u16 {
 pub static KEYS: &[Key] = &[
     k(IDM_FILE_NEW, C, ch(b'N')),
     k(IDM_FILE_OPEN, C, ch(b'O')),
+    k(IDM_FILE_QUICK_OPEN, C, ch(b'P')),
     k(IDM_FILE_SAVE, C, ch(b'S')),
     k(IDM_FILE_SAVE_AS, C | A, ch(b'S')),
     k(IDM_FILE_SAVE_ALL, C | S, ch(b'S')),
@@ -190,13 +219,17 @@ pub static KEYS: &[Key] = &[
     k(IDM_VIEW_ZOOM_OUT, C, VK_SUBTRACT),
     k(IDM_VIEW_ZOOM_RESET, C, ch(b'0')),
     k(IDM_VIEW_ZOOM_RESET, C, VK_DIVIDE),
-    k(IDM_WIN_NEXT, C, VK_TAB),
-    k(IDM_WIN_PREV, C | S, VK_TAB),
+    k(IDM_WIN_NEXT, C, VK_NEXT),
+    k(IDM_WIN_PREV, C, VK_PRIOR),
+    k(IDM_VIEW_SWITCH_FOCUS, 0, VK_F6),
+    k(IDM_VIEW_SIDEBAR, C | S, ch(b'B')),
 ];
 
 fn key_name(vk: u16) -> String {
     match vk {
         VK_TAB => "Tab".into(),
+        VK_PRIOR => "PgUp".into(),
+        VK_NEXT => "PgDn".into(),
         VK_UP => "Up".into(),
         VK_DOWN => "Down".into(),
         VK_ADD => "Num +".into(),
@@ -280,6 +313,8 @@ use Item::*;
 const FILE: &[Item] = &[
     Cmd(IDM_FILE_NEW, "新建(&N)"),
     Cmd(IDM_FILE_OPEN, "打开(&O)..."),
+    Cmd(IDM_FILE_QUICK_OPEN, "快速打开(&Q)..."),
+    Cmd(IDM_WS_ADD, "添加文件夹到工作区(&K)..."),
     Recent("最近打开的文件(&R)"),
     Sep,
     Cmd(IDM_FILE_SAVE, "保存(&S)"),
@@ -304,6 +339,7 @@ const SETTINGS: &[Item] = &[
         IDM_SET_AUTO_RELOAD,
         "文件被外部修改时自动重新载入（未修改的文档）",
     ),
+    Cmd(IDM_SET_GITIGNORE, "工作区与快速打开遵守 .gitignore"),
 ];
 
 const LINE_OPS: &[Item] = &[
@@ -384,7 +420,19 @@ const SEARCH: &[Item] = &[
     Sub("书签(&B)", BOOKMARKS),
 ];
 
+const SPLIT: &[Item] = &[
+    Cmd(IDM_VIEW_SPLIT_NONE, "不分屏(&N)"),
+    Cmd(IDM_VIEW_SPLIT_H, "左右分屏(&H)"),
+    Cmd(IDM_VIEW_SPLIT_V, "上下分屏(&V)"),
+    Sep,
+    Cmd(IDM_VIEW_SWITCH_FOCUS, "切换到另一视图(&S)"),
+    Cmd(IDM_VIEW_MOVE_OTHER, "在另一视图显示当前文档(&O)"),
+];
+
 const VIEW: &[Item] = &[
+    Cmd(IDM_VIEW_SIDEBAR, "侧边栏(&B)"),
+    Sub("分屏(&P)", SPLIT),
+    Sep,
     Cmd(IDM_VIEW_WRAP, "自动换行(&W)"),
     Cmd(IDM_VIEW_WHITESPACE, "显示空白字符(&S)"),
     Cmd(IDM_VIEW_EOL, "显示换行符(&E)"),

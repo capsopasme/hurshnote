@@ -7,6 +7,7 @@
 //! 先把需要的数据取出来、释放借用，再调用 Scintilla。
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
@@ -22,9 +23,12 @@ use hn_text::lang::{self, LANGS};
 use hn_text::lines::SortOptions;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Globalization::GetACP;
-use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, UpdateWindow};
+use windows_sys::Win32::Graphics::Gdi::{
+    ClientToScreen, CreateSolidBrush, SetBkColor, SetTextColor, UpdateWindow, HDC,
+};
 use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows_sys::Win32::UI::Controls::{InitCommonControlsEx, INITCOMMONCONTROLSEX};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
@@ -54,20 +58,40 @@ use crate::win::*;
 mod files;
 #[path = "persist.rs"]
 mod persist;
+#[path = "quick.rs"]
+mod quick;
+#[path = "sidebar.rs"]
+mod sidebar;
+#[path = "views.rs"]
+mod views;
 
 use crate::crashdump::{self, RunMarker};
 use crate::watcher::{Event as FsEvent, Watcher};
 use hn_core::snapshot::Store;
 use persist::{SnapJob, TIMER_SESSION, TIMER_SESSIONTEST, TIMER_SNAPSHOT};
+use sidebar::Drag;
 
 pub const CLASS_NAME: &str = "HurshNoteMain";
 const ID_EDITOR: usize = 100;
 const ID_STATUS: usize = 101;
+const ID_EDITOR2: usize = 102;
 const WM_APP_SELFTEST: u32 = WM_APP + 1;
 const WM_APP_LOADED: u32 = WM_APP + 2;
 const WM_APP_REFRESH: u32 = WM_APP + 3;
 const WM_APP_FILES: u32 = WM_APP + 4;
 const WM_APP_SESSIONTEST: u32 = WM_APP + 5;
+/// wParam = 文档 id；lParam = 0 时激活后把焦点移到编辑区
+const WM_APP_ACTIVATE_DOC: u32 = WM_APP + 6;
+const WM_APP_FOCUS_VIEW: u32 = WM_APP + 8;
+const WM_SETCURSOR: u32 = 0x0020;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_CAPTURECHANGED: u32 = 0x0215;
+const WM_CTLCOLORLISTBOX: u32 = 0x0134;
+const WM_CTLCOLORSTATIC: u32 = 0x0138;
+const ICC_LISTVIEW_CLASSES: u32 = 0x1;
+const ICC_TREEVIEW_CLASSES: u32 = 0x2;
 const WM_QUERYENDSESSION: u32 = 0x0011;
 const WM_ENDSESSION: u32 = 0x0016;
 const TIMER_MESSAGE: usize = 1;
@@ -113,6 +137,44 @@ pub struct App {
     fs_rx: Receiver<FsEvent>,
     pending_fs: RefCell<Vec<FsEvent>>,
     marker: RefCell<Option<RunMarker>>,
+    // ---- 分屏 ----
+    /// 两个编辑视图；`sci` 是其中的焦点视图
+    views: [Cell<Option<Sci>>; 2],
+    /// 各视图显示的文档
+    view_doc: [Cell<u32>; 2],
+    focus: Cell<usize>,
+    /// 0 不分屏，1 左右，2 上下
+    split: Cell<u8>,
+    split_ratio: Cell<f32>,
+    /// 分隔条拖动时的可用范围（左右分屏为 x，上下分屏为 y）
+    editor_span: Cell<(i32, i32)>,
+    status_height: Cell<i32>,
+    mru: RefCell<Vec<u32>>,
+    switcher: Cell<HWND>,
+    switcher_ids: RefCell<Vec<u32>>,
+    // ---- 侧边栏 ----
+    side_list: Cell<HWND>,
+    side_tree: Cell<HWND>,
+    side_lbl_open: Cell<HWND>,
+    side_lbl_ws: Cell<HWND>,
+    side_font: Cell<isize>,
+    side_brush: Cell<isize>,
+    side_suppress: Cell<bool>,
+    icon_cache: RefCell<HashMap<String, i32>>,
+    tree_nodes: RefCell<Vec<PathBuf>>,
+    splitters: RefCell<Vec<(Drag, RECT)>>,
+    drag: Cell<Option<Drag>>,
+    ctx_doc: Cell<u32>,
+    ctx_tree: Cell<isize>,
+    /// 拖放到编辑区、等待打开的文件
+    pending_drop: RefCell<Vec<PathBuf>>,
+    // ---- 快速打开 ----
+    quick: Cell<HWND>,
+    quick_paths: RefCell<Vec<PathBuf>>,
+    file_index: RefCell<Option<quick::FileIndex>>,
+    index_building: Cell<bool>,
+    index_tx: Sender<quick::FileIndex>,
+    index_rx: Receiver<quick::FileIndex>,
 }
 
 thread_local! {
@@ -140,9 +202,14 @@ pub fn run() -> i32 {
     }
 
     unsafe {
+        // 拖放目标（RegisterDragDrop）需要 OLE
+        OleInitialize(null());
         let icc = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_BAR_CLASSES | ICC_STANDARD_CLASSES,
+            dwICC: ICC_BAR_CLASSES
+                | ICC_STANDARD_CLASSES
+                | ICC_LISTVIEW_CLASSES
+                | ICC_TREEVIEW_CLASSES,
         };
         InitCommonControlsEx(&icc);
 
@@ -153,6 +220,7 @@ pub fn run() -> i32 {
         }
 
         let class_name = wide(CLASS_NAME);
+        let bg_brush = CreateSolidBrush(theme::bgr(GRUVBOX_LIGHT.bg0_s) as u32);
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: 0,
@@ -162,7 +230,7 @@ pub fn run() -> i32 {
             hInstance: hinstance,
             hIcon: LoadIconW(hinstance, 1 as _),
             hCursor: LoadCursorW(null_mut(), IDC_ARROW as usize as _),
-            hbrBackground: null_mut(),
+            hbrBackground: bg_brush,
             lpszMenuName: null(),
             lpszClassName: class_name.as_ptr(),
             hIconSm: null_mut(),
@@ -174,6 +242,7 @@ pub fn run() -> i32 {
 
         let (tx, rx) = channel();
         let (fs_tx, fs_rx) = channel();
+        let (index_tx, index_rx) = channel();
         let settings = config::load_settings();
         let store = Store::new(config::data_dir().join("snapshots"));
         let snap_tx = persist::start_writer(store.clone());
@@ -219,6 +288,36 @@ pub fn run() -> i32 {
             fs_rx,
             pending_fs: RefCell::new(Vec::new()),
             marker: RefCell::new(marker),
+            views: [Cell::new(None), Cell::new(None)],
+            view_doc: [Cell::new(0), Cell::new(0)],
+            focus: Cell::new(0),
+            split: Cell::new(0),
+            split_ratio: Cell::new(0.5),
+            editor_span: Cell::new((0, 0)),
+            status_height: Cell::new(0),
+            mru: RefCell::new(Vec::new()),
+            switcher: Cell::new(null_mut()),
+            switcher_ids: RefCell::new(Vec::new()),
+            side_list: Cell::new(null_mut()),
+            side_tree: Cell::new(null_mut()),
+            side_lbl_open: Cell::new(null_mut()),
+            side_lbl_ws: Cell::new(null_mut()),
+            side_font: Cell::new(0),
+            side_brush: Cell::new(bg_brush as isize),
+            side_suppress: Cell::new(false),
+            icon_cache: RefCell::new(HashMap::new()),
+            tree_nodes: RefCell::new(Vec::new()),
+            splitters: RefCell::new(Vec::new()),
+            drag: Cell::new(None),
+            ctx_doc: Cell::new(0),
+            ctx_tree: Cell::new(0),
+            pending_drop: RefCell::new(Vec::new()),
+            quick: Cell::new(null_mut()),
+            quick_paths: RefCell::new(Vec::new()),
+            file_index: RefCell::new(None),
+            index_building: Cell::new(false),
+            index_tx,
+            index_rx,
         });
         APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -286,11 +385,18 @@ pub fn run() -> i32 {
         let accel = build_accelerators();
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            if TranslateAcceleratorW(app.hwnd.get(), accel, &msg) != 0 {
+            if crate::crash::guard(|| app.pretranslate(&msg)) == Some(true) {
+                continue;
+            }
+            if app.accel_allowed(&msg) && TranslateAcceleratorW(app.hwnd.get(), accel, &msg) != 0 {
                 continue;
             }
             let fd = app.find_dlg.get();
             if !fd.is_null() && IsDialogMessageW(fd, &msg) != 0 {
+                continue;
+            }
+            let qd = app.quick_dialog();
+            if !qd.is_null() && IsDialogMessageW(qd, &msg) != 0 {
                 continue;
             }
             TranslateMessage(&msg);
@@ -303,6 +409,7 @@ pub fn run() -> i32 {
 
         APP.with(|a| *a.borrow_mut() = None);
         hn_sci::release_resources();
+        OleUninitialize();
         msg.wParam as i32
     }
 }
@@ -343,6 +450,17 @@ unsafe extern "system" fn editor_subclass(
     unsafe { DefSubclassProc(hwnd, msg, wp, lp) }
 }
 
+/// 编辑区 OLE 拖放目标的文件回调：记下路径，稍后在消息循环中打开（拖放过程中不弹对话框）。
+unsafe extern "C" fn on_drop_files(_ctx: *mut core::ffi::c_void, paths: *const u16) {
+    let _ = crate::crash::guard(|| {
+        let files = unsafe { hn_sci::parse_drop_paths(paths) };
+        if let Some(app) = app() {
+            app.pending_drop.borrow_mut().extend(files);
+            unsafe { PostMessageW(app.hwnd(), WM_APP_REFRESH, 2, 0) };
+        }
+    });
+}
+
 impl App {
     fn sci(&self) -> Option<Sci> {
         self.sci.get()
@@ -376,12 +494,75 @@ impl App {
                 self.command(loword(wp));
                 Some(0)
             }
-            WM_NOTIFY => {
-                self.on_notify(lp);
+            WM_NOTIFY => Some(self.on_notify(lp)),
+            WM_CONTEXTMENU => {
+                let target = wp as HWND;
+                if target == self.side_list.get() {
+                    self.list_context_menu_at_cursor(lp == -1);
+                } else if target == self.side_tree.get() {
+                    self.tree_context_menu();
+                } else if self.view_index(target).is_some() {
+                    self.show_context_menu(lp);
+                } else {
+                    return None;
+                }
                 Some(0)
             }
-            WM_CONTEXTMENU => {
-                self.show_context_menu(lp);
+            WM_SETCURSOR => {
+                if wp as HWND == hwnd && self.on_set_cursor() {
+                    Some(1)
+                } else {
+                    None
+                }
+            }
+            WM_LBUTTONDOWN => {
+                let (x, y) = point_from_lparam(lp);
+                self.on_lbutton_down(x, y).then_some(0)
+            }
+            WM_MOUSEMOVE => {
+                let (x, y) = point_from_lparam(lp);
+                self.on_mouse_move(x, y);
+                Some(0)
+            }
+            WM_LBUTTONUP => {
+                self.on_lbutton_up();
+                Some(0)
+            }
+            WM_CAPTURECHANGED => {
+                if lp as HWND != hwnd {
+                    self.drag.set(None);
+                }
+                Some(0)
+            }
+            WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX => {
+                let hdc = wp as HDC;
+                let p = &GRUVBOX_LIGHT;
+                let fg = if msg == WM_CTLCOLORSTATIC {
+                    p.gray
+                } else {
+                    p.fg1
+                };
+                unsafe {
+                    SetBkColor(hdc, theme::bgr(p.bg0_s) as u32);
+                    SetTextColor(hdc, theme::bgr(fg) as u32);
+                }
+                Some(self.side_brush.get())
+            }
+            WM_APP_ACTIVATE_DOC => {
+                self.activate(wp as u32);
+                if lp == 0 {
+                    if let Some(s) = self.sci() {
+                        unsafe { SetFocus(s.hwnd()) };
+                    }
+                }
+                Some(0)
+            }
+            WM_APP_FOCUS_VIEW => {
+                self.focus_view(wp);
+                Some(0)
+            }
+            quick::WM_APP_INDEX => {
+                self.on_index_ready();
                 Some(0)
             }
             WM_INITMENUPOPUP => {
@@ -423,6 +604,9 @@ impl App {
                 Some(0)
             }
             WM_ACTIVATE => {
+                if loword(wp) == 0 {
+                    self.switcher_close(false);
+                }
                 // 回到前台时处理期间积累的外部修改
                 if loword(wp) != 0 && !self.pending_fs.borrow().is_empty() {
                     unsafe { PostMessageW(hwnd, WM_APP_FILES, 0, 0) };
@@ -465,10 +649,13 @@ impl App {
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     )
                 };
-                if let Some(sci) = self.sci() {
-                    theme::init_view(&sci, &GRUVBOX_LIGHT, self.dpi.get());
-                    self.apply_doc_view();
+                for v in &self.views {
+                    if let Some(s) = v.get() {
+                        theme::init_view(&s, &GRUVBOX_LIGHT, self.dpi.get());
+                    }
                 }
+                self.apply_all_views();
+                self.update_sidebar_font();
                 self.layout();
                 Some(0)
             }
@@ -487,6 +674,7 @@ impl App {
                 Some(0)
             }
             WM_DESTROY => {
+                self.destroy_sidebar();
                 unsafe { PostQuitMessage(0) };
                 Some(0)
             }
@@ -507,6 +695,10 @@ impl App {
                         self.open_from_args(&a);
                     }
                 }
+                if wp == 2 {
+                    let files: Vec<PathBuf> = self.pending_drop.borrow_mut().drain(..).collect();
+                    self.open_dropped(files);
+                }
                 self.refresh();
                 Some(0)
             }
@@ -519,13 +711,23 @@ impl App {
         let Some(sci) = (unsafe { Sci::create(hwnd, self.hinstance, ID_EDITOR) }) else {
             return false;
         };
+        let Some(sci2) = (unsafe { Sci::create(hwnd, self.hinstance, ID_EDITOR2) }) else {
+            return false;
+        };
         self.sci.set(Some(sci));
-        theme::init_view(&sci, &GRUVBOX_LIGHT, self.dpi.get());
-        unsafe {
-            SetWindowSubclass(sci.hwnd(), Some(editor_subclass), 1, 0);
-            DragAcceptFiles(hwnd, 1);
-            DragAcceptFiles(sci.hwnd(), 1);
+        self.views[0].set(Some(sci));
+        self.views[1].set(Some(sci2));
+        unsafe { DragAcceptFiles(hwnd, 1) };
+        for v in [sci, sci2] {
+            theme::init_view(&v, &GRUVBOX_LIGHT, self.dpi.get());
+            unsafe {
+                SetWindowSubclass(v.hwnd(), Some(editor_subclass), 1, 0);
+                DragAcceptFiles(v.hwnd(), 1);
+                // 替换 Scintilla 自带的拖放目标：同时接受文件与文字
+                hn_sci::register_drop_target(&v, on_drop_files, null_mut());
+            }
         }
+        unsafe { ShowWindow(sci2.hwnd(), SW_HIDE) };
 
         // 接管视图自带的初始文档
         let ptr = sci.doc_pointer();
@@ -535,12 +737,15 @@ impl App {
         d.untitled = self.next_untitled();
         self.docs.borrow_mut().push(d);
         self.active.set(id);
+        self.view_doc[0].set(id);
+        self.touch_mru(id);
         *self.watcher.borrow_mut() = Some(Watcher::start(hwnd, WM_APP_FILES, self.fs_tx.clone()));
         sci.send(SCI_SETCODEPAGE, SC_CP_UTF8 as usize, 0);
         sci.send(SCI_SETEOLMODE, SC_EOL_CRLF as usize, 0);
         theme::set_language(&sci, LANGS[0].id, LANGS[0].lexer);
         self.apply_doc_view();
 
+        self.create_sidebar(hwnd);
         let sb = statusbar::create(hwnd, self.hinstance, ID_STATUS);
         self.status.set(sb);
         self.find_dlg.set(finddlg::create(hwnd, self.hinstance));
@@ -557,9 +762,12 @@ impl App {
         } else {
             statusbar::layout(sb, self.dpi.get())
         };
-        if let Some(sci) = self.sci() {
-            unsafe { MoveWindow(sci.hwnd(), 0, 0, rc.right, (rc.bottom - sh).max(0), 1) };
-        }
+        self.status_height.set(sh);
+        let h = (rc.bottom - sh).max(0);
+        let mut splitters = Vec::new();
+        let left = self.layout_sidebar(h, &mut splitters);
+        self.layout_editors(left, (rc.right - left).max(0), h, &mut splitters);
+        *self.splitters.borrow_mut() = splitters;
     }
 
     fn alloc_id(&self) -> u32 {
@@ -600,13 +808,18 @@ impl App {
         self.docs.borrow().iter().map(|d| d.id).collect()
     }
 
-    /// 文档是否有未保存修改（当前文档以 Scintilla 为准）。
+    /// 文档是否有未保存修改（显示中的文档以 Scintilla 为准）。
     fn is_dirty(&self, id: u32) -> bool {
-        if id == self.active.get() {
-            let text_mod = self.sci().is_some_and(|s| s.is_modified());
-            text_mod || self.with_doc(id, |d| d.meta_dirty).unwrap_or(false)
+        let shown = if id == self.active.get() {
+            self.sci()
         } else {
-            self.with_doc(id, |d| d.is_dirty()).unwrap_or(false)
+            self.other_view()
+                .filter(|(o, _)| self.view_doc[*o].get() == id)
+                .map(|(_, v)| v)
+        };
+        match shown {
+            Some(v) => v.is_modified() || self.with_doc(id, |d| d.meta_dirty).unwrap_or(false),
+            None => self.with_doc(id, |d| d.is_dirty()).unwrap_or(false),
         }
     }
 
@@ -621,7 +834,22 @@ impl App {
         }
     }
 
+    /// 切换到文档：已在另一视图显示时把焦点移过去，否则在焦点视图中显示。
     pub fn activate(&self, id: u32) {
+        if self.active.get() == id {
+            return;
+        }
+        if let Some((o, _)) = self.other_view() {
+            if self.view_doc[o].get() == id {
+                self.focus_view(o);
+                return;
+            }
+        }
+        self.activate_here(id);
+    }
+
+    /// 在焦点视图中显示文档。
+    fn activate_here(&self, id: u32) {
         let Some(sci) = self.sci() else { return };
         let cur = self.active.get();
         if cur == id {
@@ -635,23 +863,12 @@ impl App {
             return;
         };
         // 离开当前文档：写快照、记录状态（这些只能对当前文档读取）
-        self.snapshot_active();
-        let state = Self::capture_view(&sci);
-        let modified = sci.is_modified();
-        let (bookmarks, folds) = persist::capture_marks(&sci);
-        let eol = editops::eol_of(&sci);
-        let ro = sci.is_read_only();
-        self.with_doc_mut(cur, |d| {
-            d.view = state;
-            d.modified = modified;
-            d.bookmarks = bookmarks;
-            d.folds = folds;
-            d.eol = eol;
-            d.read_only = ro;
-        });
+        self.leave_active();
 
         sci.set_doc_pointer(ptr);
         self.active.set(id);
+        self.view_doc[self.focus.get()].set(id);
+        self.touch_mru(id);
         sci.send(SCI_SETCODEPAGE, SC_CP_UTF8 as usize, 0);
         match self.with_doc_mut(id, |d| d.init.take()).flatten() {
             Some(init) => self.apply_init(&sci, id, init),
@@ -666,11 +883,26 @@ impl App {
         self.arm_session_timer();
     }
 
-    /// 按当前文档与设置应用视图：样式、换行、空白显示、行号等。
+    /// 按当前文档与设置应用焦点视图：样式、换行、空白显示、行号等。
     fn apply_doc_view(&self) {
-        let Some(sci) = self.sci() else { return };
+        self.apply_view(self.focus.get());
+    }
+
+    /// 设置变化后应用到所有可见视图。
+    fn apply_all_views(&self) {
+        self.apply_view(self.focus.get());
+        if let Some((o, _)) = self.other_view() {
+            self.apply_view(o);
+        }
+    }
+
+    /// 按视图中的文档与设置应用视图属性。
+    fn apply_view(&self, i: usize) {
+        let Some(sci) = self.views[i].get() else {
+            return;
+        };
         let (lang_idx, long_lines) = self
-            .active_doc(|d| (d.lang, d.long_lines))
+            .with_doc(self.view_doc[i].get(), |d| (d.lang, d.long_lines))
             .unwrap_or((0, false));
         let s = self.settings.borrow().clone();
         let font = theme::FontSpec {
@@ -835,19 +1067,26 @@ impl App {
         let id = match job.reuse {
             Some(id) => {
                 // 重新载入：替换文档指针，保留位置
-                let caret_line = sci.line_from_pos(sci.current_pos());
                 let Some(old) = self.with_doc(id, |d| d.ptr) else {
                     sci.release_document(new_ptr);
                     return;
                 };
-                self.with_doc_mut(id, |d| d.ptr = new_ptr);
-                if self.active.get() == id {
-                    sci.set_doc_pointer(new_ptr);
-                } else {
+                if self.active.get() != id {
                     self.activate(id);
                 }
-                sci.release_document(old);
+                // 激活后焦点视图可能变了
+                let Some(sci) = self.sci() else { return };
+                let caret_line = sci.line_from_pos(sci.current_pos());
+                self.with_doc_mut(id, |d| d.ptr = new_ptr);
+                sci.set_doc_pointer(new_ptr);
                 sci.send(SCI_SETCODEPAGE, SC_CP_UTF8 as usize, 0);
+                if let Some((o, v)) = self.other_view() {
+                    if self.view_doc[o].get() == id {
+                        v.set_doc_pointer(new_ptr);
+                        v.send(SCI_SETCODEPAGE, SC_CP_UTF8 as usize, 0);
+                    }
+                }
+                sci.release_document(old);
                 sci.send(SCI_GOTOLINE, caret_line, 0);
                 id
             }
@@ -868,6 +1107,8 @@ impl App {
             }
         };
 
+        // 以下操作焦点视图（可能已切换）
+        let Some(sci) = self.sci() else { return };
         self.with_doc_mut(id, |d| {
             d.enc = t.info;
             d.lossy = t.lossy;
@@ -895,7 +1136,7 @@ impl App {
         sci.empty_undo_buffer();
         sci.set_save_point();
         sci.send(SCI_SETREADONLY, job.read_only as usize, 0);
-        self.apply_doc_view();
+        self.apply_all_views();
         if let Some((l, c)) = job.goto {
             editops::goto_line_col(&sci, l, c);
         }
@@ -978,10 +1219,12 @@ impl App {
                 self.activate(next);
             }
         }
+        self.retarget_other_view(id);
         let (ptr, snap) = self
             .with_doc(id, |d| (d.ptr, d.snapshot.clone()))
             .unwrap_or((0, None));
         self.docs.borrow_mut().retain(|d| d.id != id);
+        self.mru.borrow_mut().retain(|&x| x != id);
         self.unwatch(id);
         if ptr != 0 {
             sci.release_document(ptr);
@@ -1141,7 +1384,7 @@ impl App {
             return;
         }
         theme::set_language(&sci, LANGS[idx].id, LANGS[idx].lexer);
-        self.apply_doc_view();
+        self.apply_all_views();
         self.refresh();
     }
 
@@ -1168,7 +1411,7 @@ impl App {
             f(&mut s);
             config::save_settings(&s);
         }
-        self.apply_doc_view();
+        self.apply_all_views();
         self.refresh();
     }
 
@@ -1220,8 +1463,15 @@ impl App {
             }
             DragFinish(hdrop);
         }
+        self.open_dropped(files);
+    }
+
+    /// 打开拖入的文件；文件夹加入工作区。
+    fn open_dropped(&self, files: Vec<PathBuf>) {
         for f in files {
-            if f.is_file() {
+            if f.is_dir() {
+                self.add_workspace_path(&f);
+            } else if f.is_file() {
                 self.open_path(&f, None, false);
             }
         }
@@ -1277,6 +1527,24 @@ impl App {
                 }
             }
             IDM_SET_AUTO_RELOAD => self.toggle_setting(|s| s.auto_reload = !s.auto_reload),
+            IDM_SET_GITIGNORE => {
+                self.toggle_setting(|s| s.respect_gitignore = !s.respect_gitignore);
+                self.file_index.borrow_mut().take();
+                self.populate_workspace();
+            }
+            IDM_FILE_QUICK_OPEN => self.quick_show(),
+            IDM_WS_ADD => self.add_workspace_folder(),
+            IDM_VIEW_SIDEBAR => {
+                self.toggle_setting(|s| s.sidebar_visible = !s.sidebar_visible);
+                self.layout();
+            }
+            IDM_VIEW_SPLIT_NONE => self.set_split(0),
+            IDM_VIEW_SPLIT_H => self.set_split(1),
+            IDM_VIEW_SPLIT_V => self.set_split(2),
+            IDM_VIEW_SWITCH_FOCUS => self.toggle_view_focus(),
+            IDM_VIEW_MOVE_OTHER => self.show_active_in_other(),
+            IDM_CTX_CLOSE..=IDM_CTX_REVEAL => self.on_list_context_command(id),
+            IDM_TREE_OPEN..=IDM_TREE_REMOVE_ROOT => self.on_tree_command(id),
             IDM_RECENT_CLEAR => {
                 self.recent.borrow_mut().clear();
                 config::save_recent(&[]);
@@ -1396,9 +1664,10 @@ impl App {
             IDM_HELP_ABOUT => dialogs::info_box(
                 self.hwnd(),
                 &format!(
-                    "HurshNote {}\n\n原生 Windows 文本编辑器\n编辑内核：Scintilla / Lexilla\n设置目录：{}\n\nMIT License",
+                    "HurshNote {}\n\n原生 Windows 文本编辑器\n编辑内核：Scintilla / Lexilla\n设置目录：{}{}\n\nMIT License",
                     env!("CARGO_PKG_VERSION"),
-                    config::data_dir().display()
+                    config::data_dir().display(),
+                    if config::is_portable() { "（便携模式）" } else { "" }
                 ),
             ),
 
@@ -1472,21 +1741,66 @@ impl App {
 
     // ---- 通知 ----
 
-    fn on_notify(&self, lp: LPARAM) {
+    fn on_notify(&self, lp: LPARAM) -> LRESULT {
         let hdr = unsafe { &*(lp as *const Notification) };
-        if let Some(sci) = self.sci() {
-            if hdr.hwnd_from == sci.hwnd() {
-                self.on_editor_notify(&sci, hdr);
-                return;
+        if let Some(i) = self.view_index(hdr.hwnd_from) {
+            if let Some(sci) = self.views[i].get() {
+                self.on_editor_notify(i, &sci, hdr);
             }
+            return 0;
         }
-        if hdr.hwnd_from == self.status.get() && hdr.code == NM_CLICK {
+        let from = hdr.hwnd_from;
+        if from == self.side_list.get() {
+            return self.on_list_notify(lp).unwrap_or(0);
+        }
+        if from == self.side_tree.get() {
+            return self.on_tree_notify(lp).unwrap_or(0);
+        }
+        if from == self.status.get() && hdr.code == NM_CLICK {
             let nm = unsafe { &*(lp as *const statusbar::NmMouse) };
             self.on_status_click(nm.item_spec);
         }
+        0
     }
 
-    fn on_editor_notify(&self, sci: &Sci, n: &Notification) {
+    fn on_editor_notify(&self, view: usize, sci: &Sci, n: &Notification) {
+        let focused = view == self.focus.get();
+        if n.code == SCN_FOCUSIN && !focused {
+            // 用户点进了另一视图
+            if self.docs.try_borrow_mut().is_ok() {
+                self.focus_view(view);
+            } else {
+                unsafe { PostMessageW(self.hwnd(), WM_APP_FOCUS_VIEW, view, 0) };
+            }
+            return;
+        }
+        if !focused {
+            // 非焦点视图：只维护显示相关的状态
+            match n.code {
+                SCN_UPDATEUI => {
+                    editops::update_brace_match(sci);
+                    if n.updated & SC_UPDATE_CONTENT as i32 != 0 {
+                        let show = self
+                            .settings
+                            .try_borrow()
+                            .map(|s| s.line_numbers)
+                            .unwrap_or(true);
+                        theme::update_line_number_width(sci, show);
+                    }
+                }
+                SCN_SAVEPOINTREACHED | SCN_SAVEPOINTLEFT => {
+                    let id = self.view_doc[view].get();
+                    if let Ok(mut docs) = self.docs.try_borrow_mut() {
+                        if let Some(d) = docs.iter_mut().find(|d| d.id == id) {
+                            d.modified = n.code == SCN_SAVEPOINTLEFT;
+                        }
+                    }
+                    self.request_refresh();
+                }
+                _ => {}
+            }
+            return;
+        }
         match n.code {
             SCN_SAVEPOINTREACHED | SCN_SAVEPOINTLEFT => {
                 let modified = n.code == SCN_SAVEPOINTLEFT;
@@ -1554,6 +1868,12 @@ impl App {
         check(IDM_EDIT_LIST_CONTINUE, s.list_continue);
         check(IDM_SET_SNAPSHOTS, s.snapshots);
         check(IDM_SET_AUTO_RELOAD, s.auto_reload);
+        check(IDM_SET_GITIGNORE, s.respect_gitignore);
+        check(IDM_VIEW_SIDEBAR, s.sidebar_visible);
+        let split = self.split.get();
+        check(IDM_VIEW_SPLIT_NONE, split == 0);
+        check(IDM_VIEW_SPLIT_H, split == 1);
+        check(IDM_VIEW_SPLIT_V, split == 2);
         check(IDM_EDIT_READ_ONLY, sci.is_read_only());
         let eol = editops::eol_of(&sci);
         check(IDM_EOL_CRLF, eol == Eol::Crlf);
@@ -1923,6 +2243,7 @@ impl App {
     pub fn refresh(&self) {
         self.update_title();
         self.update_status();
+        self.refresh_open_list();
     }
 
     fn update_title(&self) {
@@ -2119,6 +2440,47 @@ impl App {
     }
     pub(crate) fn st_active_encrypted(&self) -> bool {
         self.active_doc(|d| d.is_encrypted()).unwrap_or(false)
+    }
+    /// 自测：把工作区设为 `dir`（不写设置文件），返回根节点展开后的子项。
+    pub(crate) fn st_workspace_tree(&self, dir: &Path) -> Vec<String> {
+        {
+            let mut s = self.settings.borrow_mut();
+            s.workspace = vec![dir.to_path_buf()];
+            s.respect_gitignore = true;
+        }
+        self.populate_workspace();
+        self.st_expand_first_root()
+    }
+    /// 自测：同步建立索引后执行快速打开查询。
+    pub(crate) fn st_quick(&self, query: &str) -> Vec<PathBuf> {
+        let roots = self.settings.borrow().workspace.clone();
+        *self.file_index.borrow_mut() = Some(quick::build_index(roots, true));
+        self.st_quick_query(query)
+    }
+    pub(crate) fn st_clear_workspace(&self) {
+        self.settings.borrow_mut().workspace.clear();
+        self.file_index.borrow_mut().take();
+        self.populate_workspace();
+    }
+    pub(crate) fn st_split(&self, mode: u8) {
+        self.set_split(mode);
+    }
+    pub(crate) fn st_toggle_focus(&self) {
+        self.toggle_view_focus();
+    }
+    pub(crate) fn st_active_id(&self) -> u32 {
+        self.active.get()
+    }
+    /// 自测：(焦点视图, 视图 0 文档, 视图 1 文档, 视图 0 指针, 视图 1 指针)
+    pub(crate) fn st_views(&self) -> (usize, u32, u32, isize, isize) {
+        let ptr = |i: usize| self.views[i].get().map(|s| s.doc_pointer()).unwrap_or(0);
+        (
+            self.focus.get(),
+            self.view_doc[0].get(),
+            self.view_doc[1].get(),
+            ptr(0),
+            ptr(1),
+        )
     }
 }
 

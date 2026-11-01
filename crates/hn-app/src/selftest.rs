@@ -321,6 +321,70 @@ pub fn run(app: &App, startup_ms: f64) -> String {
     check("encrypted_roundtrip", enc_ok, "", &mut out);
     app.st_close_active();
     app.st_close_active();
+
+    // 12. 工作区目录树（遵守 .gitignore、目录在前）与快速打开
+    let ws = dir.join("ws");
+    let _ = std::fs::create_dir_all(ws.join("sub"));
+    let _ = std::fs::write(ws.join("alpha.txt"), "a");
+    let _ = std::fs::write(ws.join("sub").join("beta_gamma.rs"), "b");
+    let _ = std::fs::write(ws.join(".gitignore"), "ignored.log\n");
+    let _ = std::fs::write(ws.join("ignored.log"), "x");
+    let names = app.st_workspace_tree(&ws);
+    check(
+        "workspace_tree",
+        names.first().map(String::as_str) == Some("sub")
+            && names.iter().any(|n| n == "alpha.txt")
+            && !names.iter().any(|n| n == "ignored.log"),
+        &format!("{names:?}"),
+        &mut out,
+    );
+    let hits = app.st_quick("bgam");
+    check(
+        "quick_open",
+        hits.first()
+            .and_then(|p| p.file_name())
+            .is_some_and(|n| n == "beta_gamma.rs")
+            && !app
+                .st_quick("ignored")
+                .iter()
+                .any(|p| p.ends_with("ignored.log")),
+        &format!("{:?}", hits.iter().take(3).collect::<Vec<_>>()),
+        &mut out,
+    );
+    app.st_clear_workspace();
+    check(
+        "sidebar_list",
+        app.st_list_count() == app.st_doc_count(),
+        &format!("list={} docs={}", app.st_list_count(), app.st_doc_count()),
+        &mut out,
+    );
+
+    // 13. 分屏：克隆当前文档；两个视图显示不同文档；F6 切换焦点；取消分屏保留焦点文档
+    let a = app.st_active_id();
+    app.st_split(1);
+    let (_, v0, v1, p0, p1) = app.st_views();
+    let cloned = v0 == a && v1 == a && p0 == p1 && p0 != 0;
+    app.new_document();
+    let b = app.st_active_id();
+    let (_, v0b, v1b, _, _) = app.st_views();
+    let separate = b != a && v0b == b && v1b == a;
+    let mru_ok = app.st_switcher_target() == Some(a);
+    app.st_toggle_focus();
+    let (f, _, _, _, _) = app.st_views();
+    let switched = f == 1 && app.st_active_id() == a;
+    app.st_split(0);
+    let (f2, v0c, v1c, _, _) = app.st_views();
+    let merged = f2 == 0 && v0c == a && v1c == 0 && app.st_active_id() == a;
+    check(
+        "split_view",
+        cloned && separate && switched && merged,
+        &format!("cloned={cloned} separate={separate} switched={switched} merged={merged}"),
+        &mut out,
+    );
+    check("mru", mru_ok, "", &mut out);
+    // 关闭分屏测试中新建的文档
+    app.activate(b);
+    app.st_close_active();
     let _ = std::fs::remove_dir_all(&dir);
 
     sci.set_save_point();

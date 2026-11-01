@@ -372,14 +372,15 @@ impl App {
 
     /// 从磁盘重新载入文档（保持编码与光标所在行）。
     pub(super) fn reload_doc(&self, id: u32) {
-        let Some(sci) = self.sci() else { return };
         let Some((path, enc, encrypted)) =
             self.with_doc(id, |d| (d.path.clone(), d.enc, d.key.is_some()))
         else {
             return;
         };
         let Some(path) = path else { return };
+        // 文档可能在另一视图中，激活后再取焦点视图
         self.activate(id);
+        let Some(sci) = self.sci() else { return };
         if encrypted {
             let key = self.with_doc(id, |d| d.key.clone()).flatten();
             let res = std::fs::read(&path)
