@@ -229,7 +229,8 @@ mod tests {
     fn collect(spec: Spec) -> (String, String, Option<i32>) {
         let events = Arc::new(Mutex::new(Vec::new()));
         let e2 = events.clone();
-        spawn(&spec, Arc::new(move |e| e2.lock().unwrap().push(e))).unwrap();
+        // 保留 Running：Windows 上丢弃它会关闭 Job 句柄并结束进程
+        let _running = spawn(&spec, Arc::new(move |e| e2.lock().unwrap().push(e))).unwrap();
         let start = Instant::now();
         loop {
             if events
