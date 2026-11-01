@@ -191,7 +191,11 @@ pub fn find_in_text(searcher: &Searcher, text: &str) -> Result<(usize, Vec<LineH
             line,
             col: s - line_start,
             col_end: e.min(content_end).max(s) - line_start,
-            text: shown.replace('\t', "    "),
+            text: if shown.contains('\t') {
+                shown.replace('\t', "    ")
+            } else {
+                shown.to_string()
+            },
         });
     }
     Ok((count, hits))
