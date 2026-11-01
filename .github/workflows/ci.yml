@@ -112,6 +112,25 @@ jobs:
           }
           Write-Host "::notice title=会话强杀测试::强杀 $n 次，恢复 $pass 次"
 
+      - name: 大文件性能测试（5 GB 日志）
+        shell: pwsh
+        run: |
+          function Fail($msg) { Write-Host "::error title=大文件性能测试::$msg"; exit 1 }
+          $exe = (Resolve-Path "target\release\hurshnote.exe").Path
+          $big = Join-Path $env:RUNNER_TEMP "big-5g.log"
+          python scripts/gen_big_log.py $big 5120
+          if (-not (Test-Path $big)) { Fail "生成测试文件失败" }
+          $out = Join-Path $env:RUNNER_TEMP "large.txt"
+          $env:HURSHNOTE_DATA_DIR = Join-Path $env:RUNNER_TEMP "hn-data-large"
+          $p = Start-Process -FilePath $exe -ArgumentList '--selftest-large', $big, $out -PassThru
+          if (-not $p.WaitForExit(400000)) { $p.Kill(); Fail "超时" }
+          Remove-Item $big -ErrorAction SilentlyContinue
+          if (-not (Test-Path $out)) { Fail "没有输出（退出码 $($p.ExitCode)）" }
+          $r = Get-Content $out
+          $r | Write-Host
+          Write-Host ("::notice title=大文件性能::" + ($r -join '%0A'))
+          if (-not ($r -contains 'result=pass')) { Fail ($r -join '%0A') }
+
       - uses: actions/upload-artifact@v4
         with:
           name: hurshnote-${{ github.sha }}

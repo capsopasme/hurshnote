@@ -14,7 +14,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use crate::app::App;
 use crate::commands::*;
 use crate::finddlg::{FindAction, FindState};
-use crate::lview::{self, Mode};
+use crate::lview::{self, Mode as ViewMode};
 
 fn ft(t: &FILETIME) -> u64 {
     ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64
@@ -526,10 +526,10 @@ fn large_checks(app: &App, dir: &std::path::Path, check: &mut dyn FnMut(&str, bo
     let back = rc.borrow().mode;
     check(
         "large_hex_toggle",
-        mode == Mode::Hex
+        mode == ViewMode::Hex
             && row >= hex_top
             && row < hex_top + vis
-            && back == Mode::Text
+            && back == ViewMode::Text
             && rc.borrow().caret == caret
             && hex_rows == 0,
         &format!("mode={mode:?} row={row} top={hex_top} vis={vis} back={back:?}"),
