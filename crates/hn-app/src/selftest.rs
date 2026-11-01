@@ -629,10 +629,22 @@ pub fn run_large(app: &App, file: &std::path::Path) -> String {
 
     let t0 = Instant::now();
     let id = app.st_open_large(file, false, false);
+    let open = t0.elapsed().as_secs_f64() * 1000.0;
     let lv = lview::view(app.st_focus_view_index());
     let rows = lv.as_ref().map(|v| v.st_paint()).unwrap_or(0);
     let first = t0.elapsed().as_secs_f64() * 1000.0;
+    let t1 = Instant::now();
+    if let Some(v) = &lv {
+        v.st_paint();
+    }
+    let repaint = t1.elapsed().as_secs_f64() * 1000.0;
     writeln!(out, "first_screen_ms={first:.1}").unwrap();
+    writeln!(out, "open_ms={open:.1}").unwrap();
+    writeln!(out, "first_paint_ms={:.1}", first - open).unwrap();
+    writeln!(out, "repaint_ms={repaint:.1}").unwrap();
+    for (k, v) in lview::st_timings() {
+        writeln!(out, "{k}={v:.1}").unwrap();
+    }
     writeln!(out, "rows={rows}").unwrap();
     let (Some(_), Some(rc), Some(lv)) = (id, app.st_active_large(), lv) else {
         out.push_str("result=fail\n");
