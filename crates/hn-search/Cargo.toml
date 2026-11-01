@@ -10,6 +10,7 @@ rust-version.workspace = true
 pcre2.workspace = true
 hn-text.workspace = true
 ignore.workspace = true
+memchr.workspace = true
 
 [lints]
 workspace = true

@@ -145,12 +145,6 @@ impl Searcher {
             .utf(true)
             .ucp(true)
             .jit_if_available(true);
-        // 安全：所有搜索入口都接收 &str（保证是合法 UTF-8），并在 find_forward 中把起止位置
-        // 对齐到字符边界，所以可以关闭 PCRE2 每次匹配时对剩余文本的 UTF 校验
-        // （否则一个文件有大量匹配时总耗时随匹配数成平方增长）。
-        unsafe {
-            b.disable_utf_check();
-        }
         let re = b.build(&body).map_err(|e| Error::Regex(e.to_string()))?;
         Ok(Searcher { re, mode: opt.mode })
     }

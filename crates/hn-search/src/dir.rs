@@ -160,16 +160,14 @@ pub fn find_in_text(searcher: &Searcher, text: &str) -> Result<(usize, Vec<LineH
     let mut line_start = 0usize;
     for &(s, e) in spans.iter().take(MAX_HITS_PER_FILE) {
         // 推进到 s 所在的行
-        for (i, &b) in bytes[pos..s].iter().enumerate() {
-            if b == b'\n' {
-                line += 1;
-                line_start = pos + i + 1;
-            }
+        let seg = &bytes[pos..s];
+        let n = memchr::memchr_iter(b'\n', seg).count();
+        if n > 0 {
+            line += n as u64;
+            line_start = pos + memchr::memrchr(b'\n', seg).map_or(0, |i| i + 1);
         }
         pos = s;
-        let line_end = bytes[s..]
-            .iter()
-            .position(|&b| b == b'\n')
+        let line_end = memchr::memchr(b'\n', &bytes[s..])
             .map(|i| s + i)
             .unwrap_or(bytes.len());
         let content_end = if line_end > line_start && bytes[line_end - 1] == b'\r' {
@@ -204,9 +202,15 @@ pub fn find_in_text(searcher: &Searcher, text: &str) -> Result<(usize, Vec<LineH
 /// 读取并搜索一个文件。
 pub fn search_file(path: &Path, searcher: &Searcher, q: &DirQuery) -> FileOutcome {
     match std::fs::metadata(path) {
-        Ok(m) if m.len() > q.max_file_size => return FileOutcome::TooLarge,
-        Ok(_) => {}
-        Err(_) => return FileOutcome::Unreadable,
+        Ok(m) => search_file_sized(path, m.len(), searcher, q),
+        Err(_) => FileOutcome::Unreadable,
+    }
+}
+
+/// 已知文件大小时读取并搜索（遍历时目录项自带大小，Windows 上省掉一次打开文件取属性）。
+pub fn search_file_sized(path: &Path, size: u64, searcher: &Searcher, q: &DirQuery) -> FileOutcome {
+    if size > q.max_file_size {
+        return FileOutcome::TooLarge;
     }
     let Ok(bytes) = std::fs::read(path) else {
         return FileOutcome::Unreadable;
@@ -296,7 +300,11 @@ pub fn search_dir(
                 return ignore::WalkState::Continue;
             }
             counters[0].fetch_add(1, Ordering::Relaxed);
-            let hit = match search_file(entry.path(), searcher, q) {
+            let outcome = match entry.metadata() {
+                Ok(m) => search_file_sized(entry.path(), m.len(), searcher, q),
+                Err(_) => search_file(entry.path(), searcher, q),
+            };
+            let hit = match outcome {
                 FileOutcome::Hits(h) => Some(h),
                 FileOutcome::Binary => {
                     counters[3].fetch_add(1, Ordering::Relaxed);
