@@ -618,6 +618,23 @@ pub struct LargeView {
 thread_local! {
     static VIEWS: RefCell<Vec<Rc<LargeView>>> = const { RefCell::new(Vec::new()) };
     static REGISTERED: Cell<bool> = const { Cell::new(false) };
+    /// 首次创建字体、渲染目标的耗时（毫秒），供性能测试输出
+    static TIMINGS: RefCell<Vec<(&'static str, f64)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn record(name: &'static str, start: std::time::Instant) {
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    TIMINGS.with(|t| {
+        let mut t = t.borrow_mut();
+        if !t.iter().any(|(k, _)| *k == name) {
+            t.push((name, ms));
+        }
+    });
+}
+
+/// 自测：各项首次初始化耗时。
+pub fn st_timings() -> Vec<(&'static str, f64)> {
+    TIMINGS.with(|t| t.borrow().clone())
 }
 
 /// 第 `idx` 个编辑视图上的大文件视图。
@@ -829,7 +846,9 @@ impl LargeView {
         } else {
             face
         };
+        let t = std::time::Instant::now();
         let f = Rc::new(Font::new(&face, px, 4).ok()?);
+        record("font_init_ms", t);
         *self.font.borrow_mut() = Some(f.clone());
         Some(f)
     }
@@ -959,7 +978,9 @@ impl LargeView {
         let doc = self.doc()?;
         let font = self.font()?;
         if self.surface.borrow().is_none() {
+            let t = std::time::Instant::now();
             let s = Surface::new(hwnd, w as u32, h as u32).ok()?;
+            record("surface_init_ms", t);
             *self.surface.borrow_mut() = Some(s);
         }
         let surf = self.surface.borrow();
@@ -973,7 +994,9 @@ impl LargeView {
                 Mode::Hex => self.render_hex(s, &d, &font, w, h, focused),
             }
         }
+        let t = std::time::Instant::now();
         let res = s.end();
+        record("first_end_draw_ms", t);
         drop(surf);
         if let Err(e) = res {
             if hn_render::needs_recreate(&e) {

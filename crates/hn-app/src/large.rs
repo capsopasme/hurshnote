@@ -696,6 +696,13 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("line-index".into())
             .spawn(move || {
+                // 后台 I/O 优先级：不和界面线程的读取抢磁盘
+                unsafe {
+                    windows_sys::Win32::System::Threading::SetThreadPriority(
+                        windows_sys::Win32::System::Threading::GetCurrentThread(),
+                        0x0001_0000, // THREAD_MODE_BACKGROUND_BEGIN
+                    )
+                };
                 index::scan(&*src, cs, block, cum, len, &cancel, &mut |up| {
                     let _ = tx.send(LargeMsg::Index { doc: id, gen, up });
                     unsafe { PostMessageW(hwnd as HWND, WM_APP_LARGE, 0, 0) };
