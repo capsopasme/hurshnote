@@ -56,6 +56,8 @@ use crate::win::*;
 
 #[path = "files.rs"]
 mod files;
+#[path = "large.rs"]
+mod large;
 #[path = "persist.rs"]
 mod persist;
 #[path = "quick.rs"]
@@ -68,6 +70,7 @@ mod views;
 use crate::crashdump::{self, RunMarker};
 use crate::watcher::{Event as FsEvent, Watcher};
 use hn_core::snapshot::Store;
+use large::{LargeMsg, LARGE_THRESHOLD, TIMER_LARGE, WM_APP_LARGE};
 use persist::{SnapJob, TIMER_SESSION, TIMER_SESSIONTEST, TIMER_SNAPSHOT};
 use sidebar::Drag;
 
@@ -123,6 +126,8 @@ pub struct App {
     /// 其他实例转发来、等待处理的命令行参数
     pending_args: RefCell<Vec<Args>>,
     selftest_out: Option<PathBuf>,
+    /// 大文件性能测试要打开的文件
+    large_test: Option<PathBuf>,
     session_test: Option<(String, String, PathBuf)>,
     // ---- 快照与会话 ----
     store: Store,
@@ -175,6 +180,16 @@ pub struct App {
     index_building: Cell<bool>,
     index_tx: Sender<quick::FileIndex>,
     index_rx: Receiver<quick::FileIndex>,
+    // ---- 大文件视图与搜索结果 ----
+    large_tx: Sender<LargeMsg>,
+    large_rx: Receiver<LargeMsg>,
+    /// 超过此大小的文件以大文件视图打开（自测时调小）
+    large_threshold: Cell<u64>,
+    results: Cell<HWND>,
+    results_items: RefCell<Vec<large::Hit>>,
+    results_doc: Cell<u32>,
+    results_gen: Cell<u32>,
+    results_shown: Cell<bool>,
 }
 
 thread_local! {
@@ -243,6 +258,7 @@ pub fn run() -> i32 {
         let (tx, rx) = channel();
         let (fs_tx, fs_rx) = channel();
         let (index_tx, index_rx) = channel();
+        let (large_tx, large_rx) = channel();
         let settings = config::load_settings();
         let store = Store::new(config::data_dir().join("snapshots"));
         let snap_tx = persist::start_writer(store.clone());
@@ -277,6 +293,7 @@ pub fn run() -> i32 {
             dpi: Cell::new(96),
             pending_args: RefCell::new(Vec::new()),
             selftest_out: args.selftest.clone(),
+            large_test: args.large_test.clone(),
             session_test: args.session_test.clone(),
             store,
             snap_tx,
@@ -318,6 +335,14 @@ pub fn run() -> i32 {
             index_building: Cell::new(false),
             index_tx,
             index_rx,
+            large_tx,
+            large_rx,
+            large_threshold: Cell::new(LARGE_THRESHOLD),
+            results: Cell::new(null_mut()),
+            results_items: RefCell::new(Vec::new()),
+            results_doc: Cell::new(0),
+            results_gen: Cell::new(0),
+            results_shown: Cell::new(false),
         });
         APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -447,6 +472,20 @@ unsafe extern "system" fn editor_subclass(
         }
         return 0;
     }
+    if msg == WM_SETFOCUS {
+        // 视图被大文件视图盖住时，焦点转给大文件视图
+        let target = crate::crash::guard(|| {
+            app()
+                .and_then(|a| a.view_index(hwnd))
+                .and_then(crate::lview::view)
+                .filter(|v| v.is_shown())
+                .map(|v| v.hwnd())
+        });
+        if let Some(Some(t)) = target {
+            unsafe { SetFocus(t) };
+            return 0;
+        }
+    }
     unsafe { DefSubclassProc(hwnd, msg, wp, lp) }
 }
 
@@ -503,6 +542,8 @@ impl App {
                     self.tree_context_menu();
                 } else if self.view_index(target).is_some() {
                     self.show_context_menu(lp);
+                } else if self.lview_index(target).is_some() {
+                    self.show_large_context_menu(lp);
                 } else {
                     return None;
                 }
@@ -561,6 +602,10 @@ impl App {
                 self.focus_view(wp);
                 Some(0)
             }
+            WM_APP_LARGE => {
+                self.on_large_msgs();
+                Some(0)
+            }
             quick::WM_APP_INDEX => {
                 self.on_index_ready();
                 Some(0)
@@ -599,6 +644,7 @@ impl App {
                     }
                     TIMER_SNAPSHOT | TIMER_SESSION => self.on_persist_timer(wp),
                     TIMER_SESSIONTEST => self.session_test_ready(),
+                    TIMER_LARGE => self.on_large_timer(),
                     _ => {}
                 }
                 Some(0)
@@ -735,6 +781,9 @@ impl App {
             }
         }
         unsafe { ShowWindow(sci2.hwnd(), SW_HIDE) };
+        for i in 0..2 {
+            crate::lview::create(hwnd, self.hinstance, i);
+        }
 
         // 接管视图自带的初始文档
         let ptr = sci.doc_pointer();
@@ -756,6 +805,7 @@ impl App {
         let sb = statusbar::create(hwnd, self.hinstance, ID_STATUS);
         self.status.set(sb);
         self.find_dlg.set(finddlg::create(hwnd, self.hinstance));
+        self.create_results(hwnd);
         true
     }
 
@@ -773,7 +823,9 @@ impl App {
         let h = (rc.bottom - sh).max(0);
         let mut splitters = Vec::new();
         let left = self.layout_sidebar(h, &mut splitters);
-        self.layout_editors(left, (rc.right - left).max(0), h, &mut splitters);
+        let width = (rc.right - left).max(0);
+        let eh = self.layout_results(left, width, h);
+        self.layout_editors(left, width, eh, &mut splitters);
         *self.splitters.borrow_mut() = splitters;
     }
 
@@ -901,6 +953,8 @@ impl App {
         if let Some((o, _)) = self.other_view() {
             self.apply_view(o);
         }
+        // 大文件视图的字体随缩放、DPI、行号设置变化
+        self.sync_overlays();
     }
 
     /// 按视图中的文档与设置应用视图属性。
@@ -1019,6 +1073,27 @@ impl App {
             self.open_encrypted(&path, goto, read_only);
             return;
         }
+        if size > self.large_threshold.get() {
+            self.open_large(&path, false, false, None);
+            return;
+        }
+        if self.selftest_out.is_none() && docs::sniff_binary(&path) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let q = format!(
+                "“{name}”看起来是二进制文件。\n\n是：用 Hex 视图打开（只读）\n否：按文本打开\n取消：不打开"
+            );
+            match dialogs::ask_yes_no_cancel(self.hwnd(), &q) {
+                Answer::Yes => {
+                    self.open_large(&path, true, false, None);
+                    return;
+                }
+                Answer::No => {}
+                Answer::Cancel => return,
+            }
+        }
         let Some(loader) = sci.create_loader(size as usize) else {
             dialogs::error_box(self.hwnd(), "内存不足，无法打开文件。");
             return;
@@ -1073,7 +1148,12 @@ impl App {
 
         let id = match job.reuse {
             Some(id) => {
-                // 重新载入：替换文档指针，保留位置
+                // 重新载入：替换文档指针，保留位置；临时 Hex 快照作废
+                self.with_doc_mut(id, |d| {
+                    if !d.is_large {
+                        d.large = None;
+                    }
+                });
                 let Some(old) = self.with_doc(id, |d| d.ptr) else {
                     sci.release_document(new_ptr);
                     return;
@@ -1233,6 +1313,8 @@ impl App {
         self.docs.borrow_mut().retain(|d| d.id != id);
         self.mru.borrow_mut().retain(|&x| x != id);
         self.unwatch(id);
+        self.drop_results_of(id);
+        self.arm_large_timer();
         if ptr != 0 {
             sci.release_document(ptr);
         }
@@ -1331,6 +1413,10 @@ impl App {
             return;
         };
         let id = self.active.get();
+        if self.active_doc(|d| d.is_large) == Some(true) {
+            self.large_reopen(choice.info.encoding);
+            return;
+        }
         if self.active_doc(|d| d.is_encrypted()) == Some(true) {
             self.show_message("加密文档始终使用 UTF-8，不能更改编码");
             return;
@@ -1488,6 +1574,10 @@ impl App {
 
     fn command(&self, id: u16) {
         let Some(sci) = self.sci() else { return };
+        // 焦点视图显示大文件视图时，编辑类命令由它处理或拦截
+        if self.large_command(id) {
+            return;
+        }
         let simple = |m: u32| {
             sci.send(m, 0, 0);
         };
@@ -1550,6 +1640,9 @@ impl App {
             IDM_VIEW_SPLIT_V => self.set_split(2),
             IDM_VIEW_SWITCH_FOCUS => self.toggle_view_focus(),
             IDM_VIEW_MOVE_OTHER => self.show_active_in_other(),
+            IDM_VIEW_HEX => self.toggle_hex(),
+            IDM_VIEW_TAIL => self.toggle_tail(),
+            IDM_SEARCH_RESULTS => self.toggle_results(),
             IDM_CTX_CLOSE..=IDM_CTX_REVEAL => self.on_list_context_command(id),
             IDM_TREE_OPEN..=IDM_TREE_REMOVE_ROOT => self.on_tree_command(id),
             IDM_RECENT_CLEAR => {
@@ -1763,6 +1856,9 @@ impl App {
         if from == self.side_tree.get() {
             return self.on_tree_notify(lp).unwrap_or(0);
         }
+        if from == self.results.get() {
+            return self.on_results_notify(lp).unwrap_or(0);
+        }
         if from == self.status.get() && hdr.code == NM_CLICK {
             let nm = unsafe { &*(lp as *const statusbar::NmMouse) };
             self.on_status_click(nm.item_spec);
@@ -1899,6 +1995,16 @@ impl App {
         for (i, z) in ZOOM_PRESETS.iter().enumerate() {
             check(IDM_ZOOM_BASE + i as u16, *z == s.zoom);
         }
+        let (hex, tail) = self
+            .active_overlay()
+            .map(|rc| {
+                let d = rc.borrow();
+                (d.mode == crate::lview::Mode::Hex, d.tail)
+            })
+            .unwrap_or((false, false));
+        check(IDM_VIEW_HEX, hex);
+        check(IDM_VIEW_TAIL, tail);
+        check(IDM_SEARCH_RESULTS, self.results_shown.get());
     }
 
     fn rebuild_recent_menu(&self, menu: HMENU) {
@@ -1984,6 +2090,20 @@ impl App {
     }
 
     fn on_status_click(&self, part: usize) {
+        if let Some(rc) = self.active_overlay() {
+            let embedded = rc.borrow().embedded;
+            match part {
+                PART_ENC if !embedded => self.popup_at_cursor(encoding_menu(IDM_ENC_REOPEN_BASE)),
+                PART_ZOOM => self.popup_at_cursor(zoom_menu()),
+                PART_STATE | PART_LANG | PART_EOL | PART_ENC => self.show_message(if embedded {
+                    "Hex 视图是只读的快照，按 Ctrl+Shift+H 返回文本视图"
+                } else {
+                    "大文件视图是只读的"
+                }),
+                _ => {}
+            }
+            return;
+        }
         let menu = match part {
             PART_LANG => language_menu(),
             PART_EOL => eol_menu(),
@@ -2006,6 +2126,22 @@ impl App {
             _ => return,
         };
         self.popup_at_cursor(menu);
+    }
+
+    fn show_large_context_menu(&self, lp: LPARAM) {
+        let (mut x, mut y) = point_from_lparam(lp);
+        if lp == -1 {
+            let mut pt = POINT { x: 0, y: 0 };
+            unsafe { GetCursorPos(&mut pt) };
+            x = pt.x;
+            y = pt.y;
+        }
+        let menu = build_large_context_menu();
+        self.update_checks(menu);
+        unsafe {
+            TrackPopupMenu(menu, TPM_RIGHTBUTTON, x, y, 0, self.hwnd(), null());
+            DestroyMenu(menu);
+        }
     }
 
     fn show_context_menu(&self, lp: LPARAM) {
@@ -2039,7 +2175,15 @@ impl App {
     fn show_find(&self, replace: bool) {
         let Some(sci) = self.sci() else { return };
         let (s, e) = (sci.selection_start(), sci.selection_end());
-        let sel = if s != e && e - s < 500 {
+        let sel = if let Some(rc) = self.active_overlay() {
+            let d = rc.borrow();
+            let (a, b) = d.sel();
+            if a < b && b - a < 500 {
+                d.selected_text().ok().filter(|t| !t.contains(['\r', '\n']))
+            } else {
+                None
+            }
+        } else if s != e && e - s < 500 {
             let t = String::from_utf8_lossy(&sci.text_range(s, e)).into_owned();
             (!t.contains(['\r', '\n'])).then_some(t)
         } else {
@@ -2089,6 +2233,10 @@ impl App {
     pub fn find_action(&self, action: FindAction, st: FindState) {
         let Some(sci) = self.sci() else { return };
         *self.find.borrow_mut() = st.clone();
+        if self.active_overlay().is_some() {
+            self.large_find(action, st);
+            return;
+        }
         if action == FindAction::ClearMarks {
             self.clear_marks();
             self.report("已清除标记");
@@ -2248,6 +2396,7 @@ impl App {
     }
 
     pub fn refresh(&self) {
+        self.sync_overlays();
         self.update_title();
         self.update_status();
         self.refresh_open_list();
@@ -2261,13 +2410,25 @@ impl App {
             return;
         };
         let dirty = self.is_dirty(id);
-        let ro = self.sci().is_some_and(|s| s.is_read_only());
+        let large = self.active_overlay().map(|rc| {
+            let d = rc.borrow();
+            if d.embedded {
+                " [Hex]"
+            } else if d.tail {
+                " [大文件 · 只读 · Tail]"
+            } else {
+                " [大文件 · 只读]"
+            }
+        });
+        let embedded = large == Some(" [Hex]");
+        let ro = self.sci().is_some_and(|s| s.is_read_only()) && (large.is_none() || embedded);
         let text = format!(
-            "{}{}{}{} - HurshNote",
+            "{}{}{}{}{} - HurshNote",
             if dirty { "*" } else { "" },
             path.map(|p| p.display().to_string()).unwrap_or(title),
             if missing { " [磁盘上已删除]" } else { "" },
-            if ro { " [只读]" } else { "" }
+            if ro { " [只读]" } else { "" },
+            large.unwrap_or("")
         );
         let w = wide(&text);
         unsafe { SetWindowTextW(self.hwnd(), w.as_ptr()) };
@@ -2277,6 +2438,10 @@ impl App {
         let sb = self.status.get();
         let Some(sci) = self.sci() else { return };
         if sb.is_null() {
+            return;
+        }
+        if let Some(rc) = self.active_overlay() {
+            self.update_large_status(sb, &rc);
             return;
         }
         let Ok(docs) = self.docs.try_borrow() else {
@@ -2383,7 +2548,10 @@ impl App {
 
     fn run_selftest(&self) {
         let startup_ms = crate::selftest::process_age_ms();
-        let report = crate::selftest::run(self, startup_ms);
+        let report = match &self.large_test {
+            Some(f) => crate::selftest::run_large(self, f),
+            None => crate::selftest::run(self, startup_ms),
+        };
         if let Some(out) = &self.selftest_out {
             let _ = std::fs::write(out, report);
         }

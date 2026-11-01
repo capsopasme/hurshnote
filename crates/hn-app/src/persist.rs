@@ -233,7 +233,7 @@ impl App {
                     d.read_only,
                 ),
             };
-            out.docs.push(SessionDoc {
+            let mut sd = SessionDoc {
                 path: d.path.clone(),
                 untitled: d.untitled,
                 snapshot: d.snapshot.clone(),
@@ -250,7 +250,22 @@ impl App {
                 bookmarks,
                 folds,
                 disk: d.disk,
-            });
+                ..Default::default()
+            };
+            if d.is_large {
+                if let Some(l) = d.large.as_ref().and_then(|l| l.try_borrow().ok()) {
+                    sd.large = true;
+                    sd.hex = l.mode == crate::lview::Mode::Hex;
+                    sd.tail = l.tail;
+                    sd.offset = l.caret;
+                    sd.encoding = l.enc.encoding.id();
+                    sd.bom = l.enc.bom;
+                    sd.snapshot = None;
+                    sd.bookmarks.clear();
+                    sd.folds.clear();
+                }
+            }
+            out.docs.push(sd);
         }
         out.split = self.split.get();
         out.split_ratio = self.split_ratio.get();
@@ -367,6 +382,11 @@ impl App {
         let Some(sd) = self.with_doc_mut(id, |d| d.pending.take()).flatten() else {
             return false;
         };
+        if sd.large {
+            if let Some(path) = sd.path.clone().filter(|p| p.exists()) {
+                return self.load_pending_large(id, &path, &sd);
+            }
+        }
         let name = self.with_doc(id, |d| d.title()).unwrap_or_default();
         let hwnd = self.hwnd();
 

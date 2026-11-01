@@ -69,6 +69,14 @@ pub struct SessionDoc {
     pub folds: Vec<usize>,
     /// 载入/保存时的磁盘状态，用于检测关闭期间文件被外部修改
     pub disk: Option<DiskStamp>,
+    /// 以只读的大文件视图打开
+    pub large: bool,
+    /// 大文件视图处于 Hex 模式
+    pub hex: bool,
+    /// 大文件视图处于 Tail 模式
+    pub tail: bool,
+    /// 大文件视图的光标字节偏移
+    pub offset: u64,
 }
 
 impl Session {
@@ -135,6 +143,13 @@ mod tests {
                 SessionDoc {
                     untitled: 2,
                     snapshot: Some("ab.snap".into()),
+                    ..Default::default()
+                },
+                SessionDoc {
+                    path: Some(PathBuf::from(r"D:\logs\huge.log")),
+                    large: true,
+                    tail: true,
+                    offset: 5_000_000_000,
                     ..Default::default()
                 },
             ],

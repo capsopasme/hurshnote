@@ -73,9 +73,9 @@ impl App {
             return;
         };
         let old = self.focus.get();
-        let had_focus = self.views[old]
-            .get()
-            .is_some_and(|s| unsafe { GetFocus() } == s.hwnd());
+        let f = unsafe { GetFocus() };
+        let had_focus = self.views[old].get().is_some_and(|s| f == s.hwnd())
+            || crate::lview::view(old).is_some_and(|v| f == v.hwnd());
         self.leave_active();
         self.focus.set(i);
         self.sci.set(Some(target));
@@ -185,21 +185,23 @@ impl App {
         height: i32,
         splitters: &mut Vec<(Drag, RECT)>,
     ) {
-        let v0 = self.views[0].get();
-        let v1 = self.views[1].get();
         let gap = 5 * self.dpi.get() as i32 / 96;
         let mode = self.split.get();
         let ratio = self.split_ratio.get();
-        let mv = |s: Option<Sci>, x: i32, y: i32, w: i32, h: i32| {
-            if let Some(s) = s {
+        // 编辑视图与盖在它上面的大文件视图占同一位置
+        let mv = |i: usize, x: i32, y: i32, w: i32, h: i32| {
+            if let Some(s) = self.views[i].get() {
                 unsafe { MoveWindow(s.hwnd(), x, y, w.max(0), h.max(0), 1) };
+            }
+            if let Some(v) = crate::lview::view(i) {
+                unsafe { MoveWindow(v.hwnd(), x, y, w.max(0), h.max(0), 1) };
             }
         };
         match mode {
             1 => {
                 let w0 = ((width - gap) as f32 * ratio) as i32;
-                mv(v0, left, 0, w0, height);
-                mv(v1, left + w0 + gap, 0, width - w0 - gap, height);
+                mv(0, left, 0, w0, height);
+                mv(1, left + w0 + gap, 0, width - w0 - gap, height);
                 self.editor_span.set((left, left + width));
                 splitters.push((
                     Drag::EditorSplit,
@@ -213,8 +215,8 @@ impl App {
             }
             2 => {
                 let h0 = ((height - gap) as f32 * ratio) as i32;
-                mv(v0, left, 0, width, h0);
-                mv(v1, left, h0 + gap, width, height - h0 - gap);
+                mv(0, left, 0, width, h0);
+                mv(1, left, h0 + gap, width, height - h0 - gap);
                 self.editor_span.set((0, height));
                 splitters.push((
                     Drag::EditorSplit,
@@ -226,7 +228,7 @@ impl App {
                     },
                 ));
             }
-            _ => mv(v0, left, 0, width, height),
+            _ => mv(0, left, 0, width, height),
         }
     }
 

@@ -329,11 +329,14 @@ impl App {
     }
 
     fn on_file_changed(&self, id: u32) {
-        let Some((path, stamp, name, loaded)) =
-            self.with_doc(id, |d| (d.path.clone(), d.disk, d.title(), d.ptr != 0))
-        else {
+        let Some((path, stamp, name, loaded, large)) = self.with_doc(id, |d| {
+            (d.path.clone(), d.disk, d.title(), d.ptr != 0, d.is_large)
+        }) else {
             return;
         };
+        if large {
+            return; // 大文件视图自己轮询（不能为算哈希读整个文件）
+        }
         let Some(path) = path else { return };
         let Some(cur) = docs::disk_stamp(&path) else {
             return;

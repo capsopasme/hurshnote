@@ -68,6 +68,7 @@ pub const IDM_SEARCH_SEL_NEXT: u16 = 1405;
 pub const IDM_SEARCH_SEL_PREV: u16 = 1406;
 pub const IDM_SEARCH_CLEAR_MARKS: u16 = 1407;
 pub const IDM_SEARCH_GOTO: u16 = 1408;
+pub const IDM_SEARCH_RESULTS: u16 = 1409;
 
 pub const IDM_BM_TOGGLE: u16 = 1501;
 pub const IDM_BM_NEXT: u16 = 1502;
@@ -96,6 +97,8 @@ pub const IDM_VIEW_SPLIT_H: u16 = 1613;
 pub const IDM_VIEW_SPLIT_V: u16 = 1614;
 pub const IDM_VIEW_SWITCH_FOCUS: u16 = 1615;
 pub const IDM_VIEW_MOVE_OTHER: u16 = 1616;
+pub const IDM_VIEW_HEX: u16 = 1617;
+pub const IDM_VIEW_TAIL: u16 = 1618;
 
 // ---- 窗口 / 帮助 ----
 pub const IDM_WIN_NEXT: u16 = 1701;
@@ -137,6 +140,7 @@ const VK_TAB: u16 = 0x09;
 const VK_PRIOR: u16 = 0x21;
 const VK_NEXT: u16 = 0x22;
 const VK_F6: u16 = 0x75;
+const VK_F7: u16 = 0x76;
 const VK_UP: u16 = 0x26;
 const VK_DOWN: u16 = 0x28;
 const VK_ADD: u16 = 0x6B;
@@ -223,6 +227,8 @@ pub static KEYS: &[Key] = &[
     k(IDM_WIN_PREV, C, VK_PRIOR),
     k(IDM_VIEW_SWITCH_FOCUS, 0, VK_F6),
     k(IDM_VIEW_SIDEBAR, C | S, ch(b'B')),
+    k(IDM_VIEW_HEX, C | S, ch(b'H')),
+    k(IDM_SEARCH_RESULTS, 0, VK_F7),
 ];
 
 fn key_name(vk: u16) -> String {
@@ -416,6 +422,7 @@ const SEARCH: &[Item] = &[
     Cmd(IDM_SEARCH_CLEAR_MARKS, "清除标记(&C)"),
     Sep,
     Cmd(IDM_SEARCH_GOTO, "跳转到行(&G)..."),
+    Cmd(IDM_SEARCH_RESULTS, "搜索结果面板(&S)"),
     Sep,
     Sub("书签(&B)", BOOKMARKS),
 ];
@@ -432,6 +439,9 @@ const SPLIT: &[Item] = &[
 const VIEW: &[Item] = &[
     Cmd(IDM_VIEW_SIDEBAR, "侧边栏(&B)"),
     Sub("分屏(&P)", SPLIT),
+    Sep,
+    Cmd(IDM_VIEW_HEX, "Hex 视图(&X)"),
+    Cmd(IDM_VIEW_TAIL, "Tail 模式：跟随文件末尾(&T)"),
     Sep,
     Cmd(IDM_VIEW_WRAP, "自动换行(&W)"),
     Cmd(IDM_VIEW_WHITESPACE, "显示空白字符(&S)"),
@@ -576,6 +586,21 @@ pub fn build_main_menu() -> Menus {
         recent: recent.unwrap_or(std::ptr::null_mut()),
         window,
     }
+}
+
+/// 大文件视图 / Hex 视图的右键菜单（调用方负责 DestroyMenu）。
+pub fn build_large_context_menu() -> HMENU {
+    const CTX: &[Item] = &[
+        Cmd(IDM_EDIT_COPY, "复制(&C)\tCtrl+C"),
+        Cmd(IDM_EDIT_SELECT_ALL, "全选(&A)\tCtrl+A"),
+        Sep,
+        Cmd(IDM_SEARCH_FIND, "查找(&F)..."),
+        Cmd(IDM_SEARCH_GOTO, "跳转到行(&G)..."),
+        Sep,
+        Cmd(IDM_VIEW_HEX, "Hex 视图(&X)"),
+        Cmd(IDM_VIEW_TAIL, "Tail 模式(&T)"),
+    ];
+    popup(CTX, &mut None)
 }
 
 /// 编辑区右键菜单（调用方负责 DestroyMenu）。

@@ -29,6 +29,8 @@ mod fsio;
 #[cfg(windows)]
 mod instance;
 #[cfg(windows)]
+mod lview;
+#[cfg(windows)]
 mod pwdlg;
 #[cfg(windows)]
 mod selftest;

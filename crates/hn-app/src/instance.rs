@@ -34,16 +34,23 @@ pub struct Args {
     pub session_test: Option<(String, String, PathBuf)>,
     /// 提权保存：(临时文件, 目标)
     pub elevated_save: Option<(PathBuf, PathBuf)>,
+    /// 大文件性能测试：要打开的文件（输出文件放在 `selftest` 中）
+    pub large_test: Option<PathBuf>,
 }
 
 /// 解析参数。支持：`文件...`、`-n<行>`、`-c<列>`、`-ro`、`-multiInst`、`-nosession`、
-/// `--selftest <输出>`、`--selftest-session <阶段> <标记> <输出>`、`--elevated-save <临时文件> <目标>`。
+/// `--selftest <输出>`、`--selftest-large <文件> <输出>`、`--selftest-session <阶段> <标记> <输出>`、
+/// `--elevated-save <临时文件> <目标>`。
 pub fn parse(args: Vec<OsString>, cwd: &Path) -> Args {
     let mut a = Args::default();
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         let s = arg.to_string_lossy().to_string();
         if s == "--selftest" {
+            a.selftest = it.next().map(PathBuf::from);
+            a.multi_inst = true;
+        } else if s == "--selftest-large" {
+            a.large_test = it.next().map(PathBuf::from);
             a.selftest = it.next().map(PathBuf::from);
             a.multi_inst = true;
         } else if s == "--selftest-session" {

@@ -14,6 +14,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use crate::app::App;
 use crate::commands::*;
 use crate::finddlg::{FindAction, FindState};
+use crate::lview::{self, Mode};
 
 fn ft(t: &FILETIME) -> u64 {
     ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64
@@ -396,9 +397,283 @@ pub fn run(app: &App, startup_ms: f64) -> String {
     // 关闭分屏测试中新建的文档
     app.activate(b);
     app.st_close_active();
+
+    // 14. 大文件视图：超过阈值改用大文件视图、行索引、跳转、绘制、搜索、选中、Hex 切换
+    large_checks(app, &dir, &mut |n, p, d| check(n, p, d, &mut out));
+
     let _ = std::fs::remove_dir_all(&dir);
 
     sci.set_save_point();
     writeln!(out, "result={}", if ok { "pass" } else { "fail" }).unwrap();
+    out
+}
+
+/// 大文件视图、Hex 视图、Tail 模式的检查。
+fn large_checks(app: &App, dir: &std::path::Path, check: &mut dyn FnMut(&str, bool, &str)) {
+    app.st_set_large_threshold(64 * 1024);
+
+    // 20000 行日志（约 1 MB），每 1000 行中第 7 行含 NEEDLE
+    let mut content = String::new();
+    let mut starts = Vec::new();
+    for i in 0..20000 {
+        starts.push(content.len() as u64);
+        let mark = if i % 1000 == 7 { " NEEDLE" } else { "" };
+        content.push_str(&format!("{i:06} INFO 第{i}行 message{mark}\r\n"));
+    }
+    let big = dir.join("big.log");
+    let _ = std::fs::write(&big, &content);
+    app.st_open(&big);
+    let rc = app.st_active_large();
+    let indexed = app.st_wait_index(15_000);
+    let lines = rc
+        .as_ref()
+        .map(|r| r.borrow().index.line_count())
+        .unwrap_or(0);
+    check(
+        "large_open",
+        app.st_active_is_large() && indexed && lines == 20001,
+        &format!(
+            "large={} indexed={indexed} lines={lines}",
+            app.st_active_is_large()
+        ),
+    );
+    let Some(rc) = rc else { return };
+
+    let off = app.st_large_goto_line(12344);
+    check(
+        "large_goto",
+        off == Some(starts[12344]),
+        &format!("{off:?} != {}", starts[12344]),
+    );
+
+    let lv = lview::view(app.st_focus_view_index());
+    let rows = lv.as_ref().map(|v| v.st_paint()).unwrap_or(0);
+    let surface = lv.as_ref().is_some_and(|v| v.st_has_surface());
+    check(
+        "large_paint",
+        rows > 0 && surface,
+        &format!("rows={rows} surface={surface}"),
+    );
+
+    // 键盘：下移一行、行尾
+    if let Some(v) = &lv {
+        v.st_key(0x28); // VK_DOWN
+        v.st_key(0x23); // VK_END
+    }
+    let caret = rc.borrow().caret;
+    let line_end = starts[12346] - 2;
+    check(
+        "large_keys",
+        caret == line_end,
+        &format!("caret={caret} expected={line_end}"),
+    );
+
+    let st = FindState {
+        pattern: "NEEDLE".into(),
+        wrap: true,
+        ..Default::default()
+    };
+    app.find_action(FindAction::MarkAll, st.clone());
+    let res = app.st_results();
+    check(
+        "large_find_all",
+        res.len() == 20 && res[0].0 == Some(7) && res[19].0 == Some(19007),
+        &format!(
+            "n={} first={:?} last={:?}",
+            res.len(),
+            res.first().map(|r| r.0),
+            res.last().map(|r| r.0)
+        ),
+    );
+
+    {
+        let mut d = rc.borrow_mut();
+        d.caret = starts[8];
+        d.anchor = starts[8];
+    }
+    app.find_action(FindAction::Next, st.clone());
+    let sel = rc.borrow().sel();
+    let needle = content.find(" NEEDLE").unwrap() as u64; // 第 7 行
+    let second = needle + content[needle as usize + 1..].find(" NEEDLE").unwrap() as u64 + 1;
+    check(
+        "large_find_next",
+        sel == (second + 1, second + 7),
+        &format!("{sel:?} expected ({}, {})", second + 1, second + 7),
+    );
+    app.find_action(FindAction::Prev, st);
+    let sel = rc.borrow().sel();
+    check(
+        "large_find_prev",
+        sel == (needle + 1, needle + 7),
+        &format!("{sel:?}"),
+    );
+    let text = rc.borrow().selected_text().unwrap_or_default();
+    check("large_copy", text == "NEEDLE", &format!("{text:?}"));
+
+    let caret = rc.borrow().caret;
+    app.st_toggle_hex();
+    let (mode, hex_top, vis) = {
+        let d = rc.borrow();
+        (
+            d.mode,
+            d.hex_top,
+            lv.as_ref().map(|v| v.visible_rows()).unwrap_or(1),
+        )
+    };
+    let row = caret / 16;
+    let hex_rows = lv.as_ref().map(|v| v.st_paint()).unwrap_or(0);
+    app.st_toggle_hex();
+    let back = rc.borrow().mode;
+    check(
+        "large_hex_toggle",
+        mode == Mode::Hex
+            && row >= hex_top
+            && row < hex_top + vis
+            && back == Mode::Text
+            && rc.borrow().caret == caret
+            && hex_rows == 0,
+        &format!("mode={mode:?} row={row} top={hex_top} vis={vis} back={back:?}"),
+    );
+    drop(rc);
+    app.st_close_active();
+
+    // 普通文档的临时 Hex 视图：光标位置换算
+    app.new_document();
+    if let Some(sci) = app.st_sci() {
+        set_text(&sci, "AB中文");
+        sci.set_sel(2, 2);
+        app.st_toggle_hex();
+        let ov = app.st_active_large();
+        let ok1 = ov.as_ref().is_some_and(|r| {
+            let d = r.borrow();
+            d.embedded && d.len() == 8 && d.caret == 2
+        });
+        if let Some(r) = &ov {
+            let mut d = r.borrow_mut();
+            d.caret = 5;
+            d.anchor = 5;
+        }
+        drop(ov);
+        app.st_toggle_hex();
+        let ok2 = app.st_active_large().is_none() && sci.current_pos() == 5;
+        check(
+            "hex_embedded",
+            ok1 && ok2,
+            &format!("ok1={ok1} ok2={ok2} pos={}", sci.current_pos()),
+        );
+    }
+    app.st_close_active();
+
+    // Tail：普通文档切换为 Tail、增长、轮转（改名后新建）
+    let log = dir.join("tail.log");
+    let _ = std::fs::write(&log, "a\r\n".repeat(10));
+    app.st_open(&log);
+    let was_text = !app.st_active_is_large();
+    app.st_toggle_tail();
+    let rc = app.st_active_large();
+    let t1 = app.st_wait_index(5000)
+        && rc.as_ref().is_some_and(|r| {
+            let d = r.borrow();
+            d.tail && d.index.line_count() == 11
+        });
+    let appended = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all("b\r\n".repeat(5).as_bytes())
+        })
+        .is_ok();
+    app.st_poll_large();
+    let t2 = appended
+        && app.st_wait_index(5000)
+        && rc.as_ref().is_some_and(|r| {
+            let d = r.borrow();
+            d.index.line_count() == 16 && d.caret == d.len() && d.len() == 45
+        });
+    let rotated = std::fs::rename(&log, dir.join("tail.log.1")).is_ok()
+        && std::fs::write(&log, "new\r\n").is_ok();
+    app.st_poll_large();
+    let t3 = rotated
+        && app.st_wait_index(5000)
+        && rc.as_ref().is_some_and(|r| {
+            let d = r.borrow();
+            d.index.line_count() == 2 && d.len() == 5
+        });
+    drop(rc);
+    app.st_toggle_tail();
+    let reverted = !app.st_active_is_large() && app.st_active_large().is_none();
+    check(
+        "tail",
+        was_text && t1 && t2 && t3 && reverted,
+        &format!("text={was_text} t1={t1} t2={t2} rotated={rotated} t3={t3} reverted={reverted}"),
+    );
+    app.st_close_active();
+
+    // 二进制检测
+    let bin = dir.join("x.bin");
+    let _ = std::fs::write(&bin, (0u8..=255).collect::<Vec<u8>>());
+    check(
+        "binary_sniff",
+        crate::docs::sniff_binary(&bin) && !crate::docs::sniff_binary(&log),
+        "",
+    );
+}
+
+/// `--selftest-large <文件> <输出>`：大文件视图性能测试（CI 用 5 GB 日志）。
+pub fn run_large(app: &App, file: &std::path::Path) -> String {
+    use std::time::Instant;
+    let mut out = String::new();
+    let len = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+    writeln!(out, "file_mb={:.0}", len as f64 / 1048576.0).unwrap();
+
+    let t0 = Instant::now();
+    let id = app.st_open_large(file, false, false);
+    let lv = lview::view(app.st_focus_view_index());
+    let rows = lv.as_ref().map(|v| v.st_paint()).unwrap_or(0);
+    let first = t0.elapsed().as_secs_f64() * 1000.0;
+    writeln!(out, "first_screen_ms={first:.1}").unwrap();
+    writeln!(out, "rows={rows}").unwrap();
+    let (Some(_), Some(rc), Some(lv)) = (id, app.st_active_large(), lv) else {
+        out.push_str("result=fail\n");
+        return out;
+    };
+    let vis = lv.visible_rows();
+
+    let time = |f: &dyn Fn()| -> f64 {
+        let t = Instant::now();
+        f();
+        lv.st_paint();
+        t.elapsed().as_secs_f64() * 1000.0
+    };
+    let mid = time(&|| rc.borrow_mut().scroll_to_fraction(0.5, vis));
+    let end = time(&|| rc.borrow_mut().goto_end(vis));
+    let mut worst = 0f64;
+    let mut total = 0f64;
+    rc.borrow_mut().scroll_to_fraction(0.3, vis);
+    for _ in 0..60 {
+        let ms = time(&|| rc.borrow_mut().scroll(vis as i64, vis));
+        worst = worst.max(ms);
+        total += ms;
+    }
+    writeln!(out, "jump_middle_ms={mid:.1}").unwrap();
+    writeln!(out, "jump_end_ms={end:.1}").unwrap();
+    writeln!(out, "page_down_avg_ms={:.2}", total / 60.0).unwrap();
+    writeln!(out, "page_down_worst_ms={worst:.2}").unwrap();
+
+    let t = Instant::now();
+    let indexed = app.st_wait_index(180_000);
+    let lines = rc.borrow().index.line_count();
+    writeln!(out, "index_ms={:.0}", t.elapsed().as_secs_f64() * 1000.0).unwrap();
+    writeln!(out, "lines={lines}").unwrap();
+    let goto = time(&|| {
+        app.st_large_goto_line(lines / 2);
+    });
+    writeln!(out, "goto_middle_ms={goto:.1}").unwrap();
+
+    let ok = rows > 0 && indexed && first < 300.0 && worst < 100.0;
+    writeln!(out, "result={}", if ok { "pass" } else { "fail" }).unwrap();
+    drop(rc);
+    app.st_close_active();
     out
 }

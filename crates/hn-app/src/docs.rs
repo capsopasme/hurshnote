@@ -13,8 +13,6 @@ use hn_sci::Loader;
 use hn_text::encoding::{self, DetectHints, EncodingInfo, TextEncoding};
 use hn_text::eol::{self, Eol};
 
-/// 超过此大小的文件暂不打开（大文件视图在 M4 实现）。
-pub const MAX_OPEN_SIZE: u64 = 256 * 1024 * 1024;
 /// 超过此大小在后台线程加载。
 pub const ASYNC_LOAD_SIZE: u64 = 4 * 1024 * 1024;
 /// 最长行超过此字节数时进入"长行模式"：关闭高亮、自动换行、缩进线。
@@ -69,6 +67,12 @@ pub struct Doc {
     /// 非当前文档的换行符与只读状态（切换时记录）
     pub eol: Eol,
     pub read_only: bool,
+    /// 大文件文档（只读的大文件视图，Scintilla 中只挂一个空文档占位）
+    pub is_large: bool,
+    /// 大文件视图状态：大文件文档始终有；普通文档显示临时 Hex 视图时也有
+    pub large: Option<std::rc::Rc<std::cell::RefCell<crate::lview::LargeDoc>>>,
+    /// 由普通文档切换为大文件视图（Tail）时，切换前的只读状态；关闭 Tail 后据此回到编辑器
+    pub from_text: Option<bool>,
 }
 
 /// 文档挂到视图后需要设置的属性（这些属性只能对当前文档设置）。
@@ -108,6 +112,9 @@ impl Doc {
             folds: Vec::new(),
             eol: Eol::Crlf,
             read_only: false,
+            is_large: false,
+            large: None,
+            from_text: None,
         }
     }
 
@@ -208,16 +215,25 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
     i
 }
 
-/// 文件大小检查。返回错误说明。
+/// 文件大小检查（是否存在、是否为文件夹）。返回错误说明。
 pub fn check_size(path: &Path) -> Result<u64, String> {
     let m = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if m.is_dir() {
         return Err("这是一个文件夹".into());
     }
-    if m.len() > MAX_OPEN_SIZE {
-        return Err("文件超过 256 MB，大文件视图尚未实现".into());
-    }
     Ok(m.len())
+}
+
+/// 文件开头 8 KB 是否像二进制文件（含 NUL 且不像 UTF-16）。
+pub fn sniff_binary(path: &Path) -> bool {
+    use std::io::Read;
+    let mut buf = vec![0u8; 8192];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut buf))
+        .unwrap_or(0);
+    buf.truncate(n);
+    !buf.is_empty()
+        && encoding::detect(&buf, &DetectHints::default()).how == encoding::Detection::Binary
 }
 
 /// 文件是否为 HurshNote 加密文件（只读前 8 字节）。

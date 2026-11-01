@@ -462,10 +462,18 @@ impl App {
         if d.missing {
             s.push_str("  [已删除]");
         }
+        if d.is_large {
+            let tail = d
+                .large
+                .as_ref()
+                .and_then(|l| l.try_borrow().ok())
+                .is_some_and(|l| l.tail);
+            s.push_str(if tail { "  [Tail]" } else { "  [大文件]" });
+        }
         s
     }
 
-    fn copy_to_wide_buf(text: &str, buf: *mut u16, cap: i32) {
+    pub(super) fn copy_to_wide_buf(text: &str, buf: *mut u16, cap: i32) {
         if buf.is_null() || cap <= 0 {
             return;
         }
