@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
+  # CreateSolidColorBrush 的画刷属性含 Matrix3x2
+  "Foundation_Numerics",
   "Win32_Foundation",
   "Win32_Graphics_Direct2D",
   "Win32_Graphics_Direct2D_Common",
