@@ -59,6 +59,8 @@ pub(super) enum Drag {
     EditorSplit,
     /// 在"打开的文件"中拖动排序（起始下标）
     DocReorder(usize),
+    /// 编辑区与底部抽屉之间
+    Drawer,
 }
 
 fn px(v: i32, dpi: u32) -> i32 {
@@ -353,6 +355,7 @@ impl App {
                 }
             }
             Drag::DocReorder(_) => 32649, // IDC_HAND
+            Drag::Drawer => IDC_SIZENS,
         }
     }
 
@@ -405,6 +408,12 @@ impl App {
                     self.split_ratio
                         .set(((pos - a) as f32 / (b - a) as f32).clamp(0.1, 0.9));
                 }
+            }
+            Drag::Drawer => {
+                // 抽屉高度 = 编辑区底边 - 鼠标位置（含页签条）
+                let bottom = rc.bottom - self.status_height.get();
+                let h = ((bottom - y) * 96 / dpi as i32).clamp(80, 2000);
+                self.settings.borrow_mut().drawer_height = h;
             }
             Drag::DocReorder(_) => return,
         }
@@ -1276,22 +1285,26 @@ impl App {
 
     /// 选择文件夹加入工作区。
     pub(super) fn add_workspace_folder(&self) {
-        let title = wide("选择要加入工作区的文件夹");
+        if let Some(p) = self.browse_folder(self.hwnd(), "选择要加入工作区的文件夹") {
+            self.add_workspace_path(&p);
+        }
+    }
+
+    /// 选择文件夹对话框。
+    pub(super) fn browse_folder(&self, owner: HWND, title: &str) -> Option<PathBuf> {
+        let title = wide(title);
         let mut bi: BROWSEINFOW = unsafe { std::mem::zeroed() };
-        bi.hwndOwner = self.hwnd();
+        bi.hwndOwner = owner;
         bi.lpszTitle = title.as_ptr();
         bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX;
         let pidl = unsafe { SHBrowseForFolderW(&bi) };
         if pidl.is_null() {
-            return;
+            return None;
         }
         let mut buf = vec![0u16; 1024];
         let ok = unsafe { SHGetPathFromIDListW(pidl, buf.as_mut_ptr()) };
         unsafe { CoTaskMemFree(pidl as *const core::ffi::c_void) };
-        if ok == 0 {
-            return;
-        }
-        self.add_workspace_path(&PathBuf::from(from_wide(&buf)));
+        (ok != 0).then(|| PathBuf::from(from_wide(&buf)))
     }
 
     pub(super) fn add_workspace_path(&self, dir: &Path) {

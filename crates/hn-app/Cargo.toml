@@ -16,6 +16,7 @@ hn-search.workspace = true
 hn-core.workspace = true
 hn-crypto.workspace = true
 hn-large.workspace = true
+hn-run.workspace = true
 zeroize.workspace = true
 serde.workspace = true
 toml.workspace = true
@@ -24,6 +25,7 @@ ignore.workspace = true
 [target.'cfg(windows)'.dependencies]
 hn-sci.workspace = true
 hn-render.workspace = true
+hn-term.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Globalization",

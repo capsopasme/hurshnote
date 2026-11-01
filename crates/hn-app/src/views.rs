@@ -302,8 +302,14 @@ impl App {
         false
     }
 
-    /// 侧边栏与快速打开中不带 Ctrl 的按键（F2、Del、F5……）留给控件自己处理，不走加速键。
+    /// 侧边栏与快速打开中不带 Ctrl 的按键（F2、Del、F5……）留给控件自己处理，不走加速键；
+    /// 终端中只放行 Ctrl+` / Ctrl+Shift+`（切换、新建终端），其余按键（含 Ctrl、Alt 组合）都交给终端。
     pub(super) fn accel_allowed(&self, msg: &MSG) -> bool {
+        if crate::term::id_of(msg.hwnd).is_some() {
+            return msg.message == WM_KEYDOWN
+                && key_down(VK_CONTROL as i32)
+                && msg.wParam == crate::commands::VK_OEM_3 as usize;
+        }
         if msg.message != WM_KEYDOWN || key_down(VK_CONTROL as i32) {
             return true;
         }

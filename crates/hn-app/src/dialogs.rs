@@ -111,6 +111,12 @@ pub fn info_box(owner: HWND, text: &str) {
     message_box(owner, text, MB_OK | MB_ICONINFORMATION);
 }
 
+/// 确定 / 取消，返回是否确定。
+pub fn ask_ok_cancel(owner: HWND, text: &str) -> bool {
+    const MB_OKCANCEL: u32 = 0x1;
+    message_box(owner, text, MB_OKCANCEL | MB_ICONWARNING) == IDOK
+}
+
 /// 是 / 否 / 取消。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {

@@ -401,6 +401,9 @@ pub fn run(app: &App, startup_ms: f64) -> String {
     // 14. 大文件视图：超过阈值改用大文件视图、行索引、跳转、绘制、搜索、选中、Hex 切换
     large_checks(app, &dir, &mut |n, p, d| check(n, p, d, &mut out));
 
+    // 15. 开发者工具：目录搜索/替换、运行 Python、终端
+    dev_checks(app, &dir, &mut |n, p, d| check(n, p, d, &mut out));
+
     let _ = std::fs::remove_dir_all(&dir);
 
     sci.set_save_point();
@@ -618,6 +621,163 @@ fn large_checks(app: &App, dir: &std::path::Path, check: &mut dyn FnMut(&str, bo
         crate::docs::sniff_binary(&bin) && !crate::docs::sniff_binary(&log),
         "",
     );
+}
+
+/// 等待条件成立（不处理消息；用于后台线程推进的状态）。
+fn wait_until(timeout_ms: u64, mut f: impl FnMut() -> bool) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if f() {
+            return true;
+        }
+        if start.elapsed().as_millis() as u64 > timeout_ms {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// M5：目录搜索与替换、输出面板与运行 Python、终端。
+fn dev_checks(app: &App, dir: &std::path::Path, check: &mut dyn FnMut(&str, bool, &str)) {
+    use crate::dirdlg::DirForm;
+    use hn_text::encoding::encoding_rs::GBK;
+
+    // ---- 目录搜索 ----
+    let root = dir.join("dirsearch");
+    let _ = std::fs::create_dir_all(root.join("src"));
+    let _ = std::fs::create_dir_all(root.join("node_modules"));
+    let _ = std::fs::write(
+        root.join("src/a.rs"),
+        "fn needle() {}\r\n// needle again\r\n",
+    );
+    let _ = std::fs::write(root.join("src/b.txt"), "nothing here\r\n");
+    let _ = std::fs::write(root.join("node_modules/x.js"), "needle");
+    let gbk_text = "这是一段用于测试简体中文编码识别的文字，需要足够长。\r\n中文 needle 测试\r\n";
+    let _ = std::fs::write(root.join("gbk.txt"), GBK.encode(gbk_text).0);
+    let mut form = DirForm {
+        pattern: "needle".into(),
+        dir: root.display().to_string(),
+        exclude: "node_modules".into(),
+        case_sensitive: true,
+        gitignore: true,
+        ..Default::default()
+    };
+    let status = app.st_dir_search(form.clone(), false);
+    let res = app.st_dir_results();
+    let mut files: Vec<String> = res
+        .iter()
+        .filter(|r| r.1 == 0)
+        .map(|r| r.0.clone())
+        .collect();
+    files.sort();
+    let gbk_hit = res
+        .iter()
+        .position(|r| r.0 == "gbk.txt" && r.1 == 2 && r.2 == "中文 needle 测试");
+    check(
+        "dir_search",
+        files == ["a.rs", "gbk.txt"] && res.len() == 5 && gbk_hit.is_some(),
+        &format!("files={files:?} rows={} status={status}", res.len()),
+    );
+
+    // 跳转：打开文件并选中匹配
+    let jumped = gbk_hit.is_some_and(|i| {
+        app.st_jump_result(i);
+        let sel = app.st_sci().map(|s| {
+            String::from_utf8_lossy(&s.text_range(s.selection_start(), s.selection_end()))
+                .into_owned()
+        });
+        app.st_active_path().is_some_and(|p| p.ends_with("gbk.txt"))
+            && sel.as_deref() == Some("needle")
+    });
+    check("dir_jump", jumped, "");
+    app.st_close_active();
+
+    // 替换：a.rs 已在编辑器中打开 → 在缓冲区替换；gbk.txt 未打开 → 按 GBK 写回磁盘
+    let a_rs = root.join("src/a.rs");
+    app.st_open(&a_rs);
+    form.replace = "pin".into();
+    let status = app.st_dir_search(form.clone(), true);
+    let gbk_now = std::fs::read(root.join("gbk.txt")).unwrap_or_default();
+    let gbk_ok = gbk_now
+        == GBK
+            .encode(&gbk_text.replace("needle", "pin"))
+            .0
+            .into_owned();
+    let disk_a = std::fs::read_to_string(&a_rs).unwrap_or_default();
+    let buf_a = app.st_sci().map(|s| text(&s)).unwrap_or_default();
+    let in_buffer = app.st_active_path().is_some_and(|p| p.ends_with("a.rs"))
+        && buf_a.contains("fn pin() {}")
+        && disk_a.contains("fn needle() {}");
+    check(
+        "dir_replace",
+        gbk_ok && in_buffer,
+        &format!("gbk={gbk_ok} buffer={in_buffer} status={status}"),
+    );
+    app.st_close_active();
+
+    // ---- 运行 Python ----
+    let script = dir.join("err.py");
+    let _ = std::fs::write(
+        &script,
+        "print('hello 中文')\nimport sys\nprint('to-stderr', file=sys.stderr)\nraise ValueError('boom')\n",
+    );
+    if app.st_python_available(&script) {
+        let code = app.st_run_python(&script, 30_000);
+        let out = app.st_output_text();
+        let ran = code == Some(Some(1))
+            && out.contains("hello 中文")
+            && out.contains("to-stderr")
+            && out.contains("ValueError: boom")
+            && out.contains("代码 1");
+        check(
+            "run_python",
+            ran,
+            &format!(
+                "code={code:?} out={:?}",
+                out.chars().take(300).collect::<String>()
+            ),
+        );
+        let jumped = app.st_output_jump("line 4")
+            && app.st_active_path().is_some_and(|p| p.ends_with("err.py"))
+            && app
+                .st_sci()
+                .is_some_and(|s| s.line_from_pos(s.current_pos()) == 3);
+        check("run_traceback_jump", jumped, "");
+        app.st_close_active();
+    } else {
+        check("run_python", true, "skipped=no-python");
+    }
+
+    // ---- 终端 ----
+    match app.st_new_terminal("cmd") {
+        Some(id) => {
+            let v = crate::term::view(id);
+            let started = v
+                .as_ref()
+                .is_some_and(|v| wait_until(15_000, || v.text().contains('>')));
+            crate::term::write(id, b"echo hn-term-%OS%\r".to_vec());
+            let echoed = v
+                .as_ref()
+                .is_some_and(|v| wait_until(10_000, || v.text().contains("hn-term-Windows_NT")));
+            let cols = v.as_ref().map(|v| v.terminal().size().cols).unwrap_or(0);
+            crate::term::write(id, b"exit\r".to_vec());
+            let exited = v
+                .as_ref()
+                .is_some_and(|v| wait_until(10_000, || v.exited()));
+            let text = v.as_ref().map(|v| v.text()).unwrap_or_default();
+            check(
+                "terminal",
+                started && echoed && exited && cols > 20,
+                &format!(
+                    "started={started} echoed={echoed} exited={exited} cols={cols} text={:?}",
+                    text.chars().take(200).collect::<String>()
+                ),
+            );
+            drop(v);
+            app.st_close_terminal(id);
+        }
+        None => check("terminal", false, "spawn failed"),
+    }
 }
 
 /// `--selftest-large <文件> <输出>`：大文件视图性能测试（CI 用 5 GB 日志）。

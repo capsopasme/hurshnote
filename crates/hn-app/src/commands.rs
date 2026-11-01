@@ -69,6 +69,7 @@ pub const IDM_SEARCH_SEL_PREV: u16 = 1406;
 pub const IDM_SEARCH_CLEAR_MARKS: u16 = 1407;
 pub const IDM_SEARCH_GOTO: u16 = 1408;
 pub const IDM_SEARCH_RESULTS: u16 = 1409;
+pub const IDM_SEARCH_IN_FILES: u16 = 1410;
 
 pub const IDM_BM_TOGGLE: u16 = 1501;
 pub const IDM_BM_NEXT: u16 = 1502;
@@ -99,6 +100,20 @@ pub const IDM_VIEW_SWITCH_FOCUS: u16 = 1615;
 pub const IDM_VIEW_MOVE_OTHER: u16 = 1616;
 pub const IDM_VIEW_HEX: u16 = 1617;
 pub const IDM_VIEW_TAIL: u16 = 1618;
+
+// ---- 运行 / 终端 ----
+pub const IDM_RUN_PYTHON: u16 = 1801;
+pub const IDM_RUN_STOP: u16 = 1802;
+pub const IDM_RUN_IN_TERMINAL: u16 = 1803;
+pub const IDM_RUN_CLEAR_OUTPUT: u16 = 1804;
+pub const IDM_VIEW_OUTPUT: u16 = 1805;
+pub const IDM_TERM_TOGGLE: u16 = 1810;
+pub const IDM_TERM_NEW: u16 = 1811;
+pub const IDM_TERM_NEW_POWERSHELL: u16 = 1812;
+pub const IDM_TERM_NEW_CMD: u16 = 1813;
+pub const IDM_TERM_NEW_PWSH: u16 = 1814;
+pub const IDM_TERM_CLOSE: u16 = 1815;
+pub const IDM_DRAWER_HIDE: u16 = 1816;
 
 // ---- 窗口 / 帮助 ----
 pub const IDM_WIN_NEXT: u16 = 1701;
@@ -139,6 +154,7 @@ pub const ZOOM_PRESETS: &[u32] = &[50, 75, 90, 100, 110, 125, 150, 175, 200, 250
 const VK_TAB: u16 = 0x09;
 const VK_PRIOR: u16 = 0x21;
 const VK_NEXT: u16 = 0x22;
+const VK_F5: u16 = 0x74;
 const VK_F6: u16 = 0x75;
 const VK_F7: u16 = 0x76;
 const VK_UP: u16 = 0x26;
@@ -150,6 +166,8 @@ const VK_F2: u16 = 0x71;
 const VK_F3: u16 = 0x72;
 const VK_OEM_PLUS: u16 = 0xBB;
 const VK_OEM_MINUS: u16 = 0xBD;
+/// 美式键盘上的 ` ~ 键
+pub const VK_OEM_3: u16 = 0xC0;
 
 const C: u8 = 1;
 const S: u8 = 2;
@@ -229,6 +247,12 @@ pub static KEYS: &[Key] = &[
     k(IDM_VIEW_SIDEBAR, C | S, ch(b'B')),
     k(IDM_VIEW_HEX, C | S, ch(b'H')),
     k(IDM_SEARCH_RESULTS, 0, VK_F7),
+    k(IDM_SEARCH_IN_FILES, C | S, ch(b'F')),
+    k(IDM_RUN_PYTHON, 0, VK_F5),
+    k(IDM_RUN_STOP, S, VK_F5),
+    k(IDM_RUN_IN_TERMINAL, C, VK_F5),
+    k(IDM_TERM_TOGGLE, C, VK_OEM_3),
+    k(IDM_TERM_NEW, C | S, VK_OEM_3),
 ];
 
 fn key_name(vk: u16) -> String {
@@ -243,6 +267,7 @@ fn key_name(vk: u16) -> String {
         VK_DIVIDE => "Num /".into(),
         VK_OEM_PLUS => "=".into(),
         VK_OEM_MINUS => "-".into(),
+        VK_OEM_3 => "`".into(),
         0x70..=0x7B => format!("F{}", vk - 0x6F),
         _ => char::from_u32(vk as u32)
             .map(String::from)
@@ -422,6 +447,7 @@ const SEARCH: &[Item] = &[
     Cmd(IDM_SEARCH_CLEAR_MARKS, "清除标记(&C)"),
     Sep,
     Cmd(IDM_SEARCH_GOTO, "跳转到行(&G)..."),
+    Cmd(IDM_SEARCH_IN_FILES, "在文件中查找(&I)..."),
     Cmd(IDM_SEARCH_RESULTS, "搜索结果面板(&S)"),
     Sep,
     Sub("书签(&B)", BOOKMARKS),
@@ -455,6 +481,27 @@ const VIEW: &[Item] = &[
     Sep,
     Cmd(IDM_VIEW_FOLD_ALL, "折叠全部"),
     Cmd(IDM_VIEW_UNFOLD_ALL, "展开全部"),
+];
+
+const TERMINALS: &[Item] = &[
+    Cmd(IDM_TERM_NEW_POWERSHELL, "PowerShell"),
+    Cmd(IDM_TERM_NEW_PWSH, "PowerShell 7（pwsh）"),
+    Cmd(IDM_TERM_NEW_CMD, "命令提示符（cmd）"),
+];
+
+const RUN: &[Item] = &[
+    Cmd(IDM_RUN_PYTHON, "运行 Python(&R)"),
+    Cmd(IDM_RUN_IN_TERMINAL, "在终端中运行(&T)"),
+    Cmd(IDM_RUN_STOP, "停止(&S)"),
+    Cmd(IDM_RUN_CLEAR_OUTPUT, "清空输出(&C)"),
+    Sep,
+    Cmd(IDM_TERM_TOGGLE, "显示/隐藏终端(&O)"),
+    Cmd(IDM_TERM_NEW, "新建终端(&N)"),
+    Sub("新建指定终端(&W)", TERMINALS),
+    Cmd(IDM_TERM_CLOSE, "关闭当前终端(&L)"),
+    Sep,
+    Cmd(IDM_VIEW_OUTPUT, "输出面板(&P)"),
+    Cmd(IDM_DRAWER_HIDE, "隐藏底部面板(&H)"),
 ];
 
 const ENCODING: &[Item] = &[EncReopen("重新打开为(&R)"), EncConvert("转换为(&C)")];
@@ -560,11 +607,12 @@ pub fn build_main_menu() -> Menus {
     let bar = unsafe { CreateMenu() };
     let mut recent = None;
     let mut window = std::ptr::null_mut();
-    let tops: [(&str, &[Item]); 8] = [
+    let tops: [(&str, &[Item]); 9] = [
         ("文件(&F)", FILE),
         ("编辑(&E)", EDIT),
         ("搜索(&S)", SEARCH),
         ("视图(&V)", VIEW),
+        ("运行(&R)", RUN),
         ("编码(&N)", ENCODING),
         ("语言(&L)", &[]),
         ("窗口(&W)", WINDOW),

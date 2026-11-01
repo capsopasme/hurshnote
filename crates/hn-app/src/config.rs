@@ -42,6 +42,15 @@ pub struct Settings {
     pub workspace: Vec<PathBuf>,
     /// 工作区与快速打开遵守 .gitignore
     pub respect_gitignore: bool,
+    /// 底部抽屉高度（DIP，含页签条）
+    pub drawer_height: i32,
+    /// Python 解释器路径；空为自动探测
+    pub python: String,
+    /// 新建终端使用的 shell：powershell / pwsh / cmd，或可执行文件的完整路径
+    pub terminal_shell: String,
+    /// 目录搜索：文件类型与排除项（逗号或分号分隔的通配符）
+    pub dir_include: String,
+    pub dir_exclude: String,
 }
 
 impl Default for Settings {
@@ -65,6 +74,11 @@ impl Default for Settings {
             sidebar_split: 0.35,
             workspace: Vec::new(),
             respect_gitignore: true,
+            drawer_height: 220,
+            python: String::new(),
+            terminal_shell: "powershell".into(),
+            dir_include: String::new(),
+            dir_exclude: "node_modules".into(),
         }
     }
 }
@@ -103,6 +117,10 @@ fn sanitize(mut s: Settings) -> Settings {
     s.sidebar_width = s.sidebar_width.clamp(120, 800);
     if !(0.1..=0.9).contains(&s.sidebar_split) {
         s.sidebar_split = 0.35;
+    }
+    s.drawer_height = s.drawer_height.clamp(80, 2000);
+    if s.terminal_shell.trim().is_empty() {
+        s.terminal_shell = "powershell".into();
     }
     if s.font_face.trim().is_empty() {
         s.font_face = "Consolas".into();

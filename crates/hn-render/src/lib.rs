@@ -24,10 +24,10 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS,
-    DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_METRICS,
-    DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 
 thread_local! {
@@ -211,6 +211,17 @@ fn wide(s: &str) -> Vec<u16> {
 impl Font {
     /// `size_px` 为像素字号；`tab_chars` 为制表符宽度（字符数）。
     pub fn new(face: &str, size_px: f32, tab_chars: u32) -> Result<Font> {
+        Font::styled(face, size_px, tab_chars, false, false)
+    }
+
+    /// 指定粗体/斜体的字体。度量按各自字形测量，调用方需要等宽网格时应以常规字体的度量为准。
+    pub fn styled(
+        face: &str,
+        size_px: f32,
+        tab_chars: u32,
+        bold: bool,
+        italic: bool,
+    ) -> Result<Font> {
         let (_, dw) = factories()?;
         let face_w = wide(face);
         let locale = wide("zh-cn");
@@ -218,8 +229,16 @@ impl Font {
             dw.CreateTextFormat(
                 PCWSTR(face_w.as_ptr()),
                 None,
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
+                if bold {
+                    DWRITE_FONT_WEIGHT_BOLD
+                } else {
+                    DWRITE_FONT_WEIGHT_NORMAL
+                },
+                if italic {
+                    DWRITE_FONT_STYLE_ITALIC
+                } else {
+                    DWRITE_FONT_STYLE_NORMAL
+                },
                 DWRITE_FONT_STRETCH_NORMAL,
                 size_px.max(1.0),
                 PCWSTR(locale.as_ptr()),

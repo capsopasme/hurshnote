@@ -54,6 +54,10 @@ use crate::instance::{self, Args};
 use crate::statusbar::{self, *};
 use crate::win::*;
 
+#[path = "dirsearch.rs"]
+mod dirsearch;
+#[path = "drawer.rs"]
+mod drawer;
 #[path = "files.rs"]
 mod files;
 #[path = "large.rs"]
@@ -62,6 +66,8 @@ mod large;
 mod persist;
 #[path = "quick.rs"]
 mod quick;
+#[path = "runpy.rs"]
+mod runpy;
 #[path = "sidebar.rs"]
 mod sidebar;
 #[path = "views.rs"]
@@ -69,9 +75,11 @@ mod views;
 
 use crate::crashdump::{self, RunMarker};
 use crate::watcher::{Event as FsEvent, Watcher};
+use dirsearch::{DirJob, DirMsg, WM_APP_DIRSEARCH};
 use hn_core::snapshot::Store;
 use large::{LargeMsg, LARGE_THRESHOLD, TIMER_LARGE, WM_APP_LARGE};
 use persist::{SnapJob, TIMER_SESSION, TIMER_SESSIONTEST, TIMER_SNAPSHOT};
+use runpy::{RunState, WM_APP_RUN};
 use sidebar::Drag;
 
 pub const CLASS_NAME: &str = "HurshNoteMain";
@@ -95,6 +103,7 @@ const WM_CTLCOLORLISTBOX: u32 = 0x0134;
 const WM_CTLCOLORSTATIC: u32 = 0x0138;
 const ICC_LISTVIEW_CLASSES: u32 = 0x1;
 const ICC_TREEVIEW_CLASSES: u32 = 0x2;
+const ICC_TAB_CLASSES: u32 = 0x8;
 const WM_QUERYENDSESSION: u32 = 0x0011;
 const WM_ENDSESSION: u32 = 0x0016;
 const TIMER_MESSAGE: usize = 1;
@@ -185,11 +194,30 @@ pub struct App {
     large_rx: Receiver<LargeMsg>,
     /// 超过此大小的文件以大文件视图打开（自测时调小）
     large_threshold: Cell<u64>,
+    // ---- 底部抽屉：搜索结果 / 输出 / 终端 ----
     results: Cell<HWND>,
-    results_items: RefCell<Vec<large::Hit>>,
+    results_items: RefCell<Vec<drawer::ResultItem>>,
+    /// 大文件搜索结果所属文档（目录搜索为 0）
     results_doc: Cell<u32>,
     results_gen: Cell<u32>,
-    results_shown: Cell<bool>,
+    drawer_tab: Cell<HWND>,
+    drawer_info: Cell<HWND>,
+    drawer_shown: Cell<bool>,
+    drawer_page: Cell<usize>,
+    drawer_pages: RefCell<Vec<drawer::Page>>,
+    output: Cell<Option<Sci>>,
+    // ---- 运行 Python ----
+    run: RefCell<RunState>,
+    /// 最近一次运行的脚本目录（输出中相对路径的基准）
+    run_dir: RefCell<Option<PathBuf>>,
+    // ---- 目录搜索 ----
+    dir_dlg: Cell<HWND>,
+    dir_form: RefCell<crate::dirdlg::DirForm>,
+    dir_job: RefCell<Option<DirJob>>,
+    dir_gen: Cell<u32>,
+    dir_tx: Sender<DirMsg>,
+    dir_rx: Receiver<DirMsg>,
+    dir_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 thread_local! {
@@ -224,7 +252,8 @@ pub fn run() -> i32 {
             dwICC: ICC_BAR_CLASSES
                 | ICC_STANDARD_CLASSES
                 | ICC_LISTVIEW_CLASSES
-                | ICC_TREEVIEW_CLASSES,
+                | ICC_TREEVIEW_CLASSES
+                | ICC_TAB_CLASSES,
         };
         InitCommonControlsEx(&icc);
 
@@ -259,6 +288,7 @@ pub fn run() -> i32 {
         let (fs_tx, fs_rx) = channel();
         let (index_tx, index_rx) = channel();
         let (large_tx, large_rx) = channel();
+        let (dir_tx, dir_rx) = channel();
         let settings = config::load_settings();
         let store = Store::new(config::data_dir().join("snapshots"));
         let snap_tx = persist::start_writer(store.clone());
@@ -342,7 +372,26 @@ pub fn run() -> i32 {
             results_items: RefCell::new(Vec::new()),
             results_doc: Cell::new(0),
             results_gen: Cell::new(0),
-            results_shown: Cell::new(false),
+            drawer_tab: Cell::new(null_mut()),
+            drawer_info: Cell::new(null_mut()),
+            drawer_shown: Cell::new(false),
+            drawer_page: Cell::new(0),
+            drawer_pages: RefCell::new(Vec::new()),
+            output: Cell::new(None),
+            run: RefCell::new(RunState::default()),
+            run_dir: RefCell::new(None),
+            dir_dlg: Cell::new(null_mut()),
+            dir_form: RefCell::new(crate::dirdlg::DirForm {
+                include: settings.dir_include.clone(),
+                exclude: settings.dir_exclude.clone(),
+                gitignore: true,
+                ..Default::default()
+            }),
+            dir_job: RefCell::new(None),
+            dir_gen: Cell::new(0),
+            dir_tx,
+            dir_rx,
+            dir_pending: Default::default(),
         });
         APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -418,6 +467,10 @@ pub fn run() -> i32 {
             }
             let fd = app.find_dlg.get();
             if !fd.is_null() && IsDialogMessageW(fd, &msg) != 0 {
+                continue;
+            }
+            let dd = app.dir_dlg.get();
+            if !dd.is_null() && IsDialogMessageW(dd, &msg) != 0 {
                 continue;
             }
             let qd = app.quick_dialog();
@@ -606,6 +659,14 @@ impl App {
                 self.on_large_msgs();
                 Some(0)
             }
+            WM_APP_RUN => {
+                self.on_run_msgs();
+                Some(0)
+            }
+            WM_APP_DIRSEARCH => {
+                self.on_dir_msgs();
+                Some(0)
+            }
             quick::WM_APP_INDEX => {
                 self.on_index_ready();
                 Some(0)
@@ -705,6 +766,7 @@ impl App {
                 }
                 self.apply_all_views();
                 self.update_sidebar_font();
+                self.update_drawer_font();
                 self.layout();
                 Some(0)
             }
@@ -805,7 +867,7 @@ impl App {
         let sb = statusbar::create(hwnd, self.hinstance, ID_STATUS);
         self.status.set(sb);
         self.find_dlg.set(finddlg::create(hwnd, self.hinstance));
-        self.create_results(hwnd);
+        self.create_drawer(hwnd);
         true
     }
 
@@ -824,7 +886,7 @@ impl App {
         let mut splitters = Vec::new();
         let left = self.layout_sidebar(h, &mut splitters);
         let width = (rc.right - left).max(0);
-        let eh = self.layout_results(left, width, h);
+        let eh = self.layout_drawer(left, width, h, &mut splitters);
         self.layout_editors(left, width, eh, &mut splitters);
         *self.splitters.borrow_mut() = splitters;
     }
@@ -1643,6 +1705,33 @@ impl App {
             IDM_VIEW_HEX => self.toggle_hex(),
             IDM_VIEW_TAIL => self.toggle_tail(),
             IDM_SEARCH_RESULTS => self.toggle_results(),
+            IDM_SEARCH_IN_FILES => self.show_dir_dialog(),
+            IDM_RUN_PYTHON => self.run_python(false),
+            IDM_RUN_IN_TERMINAL => self.run_python(true),
+            IDM_RUN_STOP => self.stop_run(),
+            IDM_RUN_CLEAR_OUTPUT => self.output_clear(),
+            IDM_VIEW_OUTPUT => {
+                if self.drawer_shown.get() && self.current_page() == Some(drawer::Page::Output) {
+                    self.hide_drawer();
+                } else {
+                    self.show_page(drawer::Page::Output, false);
+                }
+            }
+            IDM_TERM_TOGGLE => self.toggle_drawer(),
+            IDM_TERM_NEW => {
+                self.new_terminal(None);
+            }
+            IDM_TERM_NEW_POWERSHELL => {
+                self.new_terminal(Some("powershell"));
+            }
+            IDM_TERM_NEW_PWSH => {
+                self.new_terminal(Some("pwsh"));
+            }
+            IDM_TERM_NEW_CMD => {
+                self.new_terminal(Some("cmd"));
+            }
+            IDM_TERM_CLOSE => self.close_current_terminal(),
+            IDM_DRAWER_HIDE => self.hide_drawer(),
             IDM_CTX_CLOSE..=IDM_CTX_REVEAL => self.on_list_context_command(id),
             IDM_TREE_OPEN..=IDM_TREE_REMOVE_ROOT => self.on_tree_command(id),
             IDM_RECENT_CLEAR => {
@@ -1859,6 +1948,15 @@ impl App {
         if from == self.results.get() {
             return self.on_results_notify(lp).unwrap_or(0);
         }
+        if from == self.drawer_tab.get() {
+            return self.on_tab_notify(lp).unwrap_or(0);
+        }
+        if let Some(o) = self.output.get() {
+            if from == o.hwnd() {
+                self.on_output_notify(hdr);
+                return 0;
+            }
+        }
         if from == self.status.get() && hdr.code == NM_CLICK {
             let nm = unsafe { &*(lp as *const statusbar::NmMouse) };
             self.on_status_click(nm.item_spec);
@@ -2004,7 +2102,27 @@ impl App {
             .unwrap_or((false, false));
         check(IDM_VIEW_HEX, hex);
         check(IDM_VIEW_TAIL, tail);
-        check(IDM_SEARCH_RESULTS, self.results_shown.get());
+        let page = self
+            .drawer_shown
+            .get()
+            .then(|| self.current_page())
+            .flatten();
+        check(IDM_SEARCH_RESULTS, page == Some(drawer::Page::Results));
+        check(IDM_VIEW_OUTPUT, page == Some(drawer::Page::Output));
+        let running = self.is_running();
+        unsafe {
+            EnableMenuItem(
+                menu,
+                IDM_RUN_STOP as u32,
+                if running { 0 } else { MF_GRAYED },
+            );
+            let term = matches!(page, Some(drawer::Page::Term(_)));
+            EnableMenuItem(
+                menu,
+                IDM_TERM_CLOSE as u32,
+                if term { 0 } else { MF_GRAYED },
+            );
+        }
     }
 
     fn rebuild_recent_menu(&self, menu: HMENU) {
@@ -2571,6 +2689,9 @@ impl App {
     // 供自测使用的内部接口
     pub(crate) fn st_sci(&self) -> Option<Sci> {
         self.sci()
+    }
+    pub(crate) fn st_active_path(&self) -> Option<PathBuf> {
+        self.active_doc(|d| d.path.clone()).flatten()
     }
     pub(crate) fn st_doc_count(&self) -> usize {
         self.docs.borrow().len()

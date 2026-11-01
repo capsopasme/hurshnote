@@ -412,3 +412,46 @@ pub fn update_line_number_width(sci: &Sci, visible: bool) {
     let w = sci.send_str(SCI_TEXTWIDTH, STYLE_LINENUMBER as usize, &sample);
     sci.send(SCI_SETMARGINWIDTHN, MARGIN_NUMBERS, w);
 }
+
+/// 输出面板的样式编号。
+pub mod out_style {
+    /// 普通输出
+    pub const NORMAL: u8 = 0;
+    /// 标准错误
+    pub const ERROR: u8 = 1;
+    /// 提示信息（开始运行、退出码）
+    pub const INFO: u8 = 2;
+    /// 成功
+    pub const OK: u8 = 3;
+    /// ANSI 颜色 0–15 对应的样式起点
+    pub const ANSI: u8 = 10;
+}
+
+/// ANSI 16 色（Gruvbox Light 终端配色）。
+pub const ANSI_COLORS: [u32; 16] = [
+    0x3c3836, 0xcc241d, 0x98971a, 0xd79921, 0x458588, 0xb16286, 0x689d6a, 0x7c6f64, 0x928374,
+    0x9d0006, 0x79740e, 0xb57614, 0x076678, 0x8f3f71, 0x427b58, 0x3c3836,
+];
+
+/// 初始化输出面板（只读、无边栏、自动换行、由程序着色）。
+pub fn init_output(sci: &Sci, p: &Palette, font: &FontSpec, zoom_pct: u32) {
+    sci.send(SCI_SETILEXER, 0, 0);
+    apply_styles(sci, p, font, zoom_pct, "text");
+    for m in 0..5 {
+        sci.send(SCI_SETMARGINWIDTHN, m, 0);
+    }
+    sci.send(SCI_SETMARGINLEFT, 0, 4);
+    sci.send(SCI_SETWRAPMODE, SC_WRAP_WORD as usize, 0);
+    sci.send(SCI_SETINDENTATIONGUIDES, SC_IV_NONE as usize, 0);
+    sci.send(SCI_SETCARETLINEVISIBLE, 0, 0);
+    sci.send(SCI_SETREADONLY, 1, 0);
+    sci.send(SCI_SETUNDOCOLLECTION, 0, 0);
+    sci.send(SCI_STYLESETFORE, out_style::ERROR as usize, bgr(p.red));
+    sci.send(SCI_STYLESETFORE, out_style::INFO as usize, bgr(p.blue));
+    sci.send(SCI_STYLESETITALIC, out_style::INFO as usize, 1);
+    sci.send(SCI_STYLESETFORE, out_style::OK as usize, bgr(p.green));
+    sci.send(SCI_STYLESETITALIC, out_style::OK as usize, 1);
+    for (i, c) in ANSI_COLORS.iter().enumerate() {
+        sci.send(SCI_STYLESETFORE, out_style::ANSI as usize + i, bgr(*c));
+    }
+}

@@ -280,7 +280,11 @@ mod tests {
     fn stdout_stderr_exit_code() {
         let (o, e, c) = collect(Spec {
             program: "cmd.exe".into(),
-            args: vec!["/c".into(), "echo out& echo err 1>&2& exit /b 3".into()],
+            // 每段不含空格：含空格的参数会被整体加引号，cmd 遇到引号内的 & 会把整串当成命令名
+            args: "/d /c echo out& echo err 1>&2& exit /b 3"
+                .split(' ')
+                .map(String::from)
+                .collect(),
             ..Default::default()
         });
         assert_eq!(o.trim(), "out");

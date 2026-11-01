@@ -111,6 +111,40 @@ impl Sci {
         self.send(msg, wparam, c.as_ptr() as isize)
     }
 
+    /// 在末尾追加一段文字并设为指定样式（输出面板用，无 lexer）。
+    /// 追加前光标在末尾时滚动到末尾。文字超过 `limit` 字节时删掉开头的若干行。
+    pub fn append_styled(&self, text: &[u8], style: u8, limit: usize) {
+        if text.is_empty() {
+            return;
+        }
+        let ro = self.send(SCI_GETREADONLY, 0, 0);
+        let at_end = self.current_pos() == self.len();
+        self.send(SCI_SETREADONLY, 0, 0);
+        let start = self.len();
+        self.send(SCI_APPENDTEXT, text.len(), text.as_ptr() as isize);
+        self.send(SCI_STARTSTYLING, start, 0);
+        self.send(SCI_SETSTYLING, text.len(), style as isize);
+        let len = self.len();
+        if len > limit {
+            let line = self.line_from_pos(len - limit / 2);
+            let cut = self.line_start(line);
+            self.send(SCI_DELETERANGE, 0, cut as isize);
+        }
+        self.send(SCI_SETREADONLY, ro as usize, 0);
+        if at_end {
+            let end = self.len();
+            self.send(SCI_GOTOPOS, end, 0);
+        }
+    }
+
+    /// 清空只读文档（输出面板用）。
+    pub fn clear_readonly(&self) {
+        let ro = self.send(SCI_GETREADONLY, 0, 0);
+        self.send(SCI_SETREADONLY, 0, 0);
+        self.send(SCI_CLEARALL, 0, 0);
+        self.send(SCI_SETREADONLY, ro as usize, 0);
+    }
+
     /// 用给定的 UTF-8 字节替换全部文本（可含 NUL）。不清空撤销历史。
     pub fn set_bytes(&self, text: &[u8]) {
         self.send(SCI_CLEARALL, 0, 0);

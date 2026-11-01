@@ -1,4 +1,4 @@
-//! 大文件视图、Hex 视图、Tail 模式、大文件搜索与搜索结果面板（`app` 的子模块）。
+//! 大文件视图、Hex 视图、Tail 模式与大文件搜索（`app` 的子模块；结果列在底部抽屉中）。
 //!
 //! - 超过阈值（256 MB）的文件、用户选择以 Hex 打开的二进制文件，以"大文件文档"打开：
 //!   `Doc.is_large` 为真，`Doc.large` 持有状态，Scintilla 中挂一个空的只读文档占位
@@ -18,17 +18,14 @@ use hn_large::{decode, ByteSource, Charset};
 use hn_search::Searcher;
 use hn_text::encoding::TextEncoding;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
-use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
 
 use super::*;
-use crate::ctl::*;
 use crate::docs::DocInit;
 use crate::lview::{self, LargeDoc, Mode};
 
 pub(super) const WM_APP_LARGE: u32 = WM_APP + 9;
 pub(super) const TIMER_LARGE: usize = 5;
 const POLL_MS: u32 = 500;
-pub(super) const ID_RESULTS: usize = 120;
 /// 结果列表最多保留的条数（计数不受限制）。
 const MAX_HITS: usize = 100_000;
 const PREVIEW_CHARS: usize = 300;
@@ -1311,11 +1308,8 @@ impl App {
             }
         };
         if list {
-            self.results_items.borrow_mut().clear();
-            self.results_doc.set(doc);
-            self.results_gen.set(job.gen);
-            self.results_count_changed();
-            self.show_results(true);
+            self.results_begin(doc, job.gen);
+            self.show_page(drawer::Page::Results, false);
         }
         self.report("正在搜索…（Esc 取消）");
         let tx = self.large_tx.clone();
@@ -1367,8 +1361,17 @@ impl App {
             }
             SearchEvent::Hits(v) => {
                 if self.results_doc.get() == doc && self.results_gen.get() == gen {
-                    self.results_items.borrow_mut().extend(v);
-                    self.results_count_changed();
+                    self.results_push(
+                        v.into_iter()
+                            .map(|h| drawer::ResultItem::Large {
+                                doc,
+                                line: h.line,
+                                start: h.start,
+                                end: h.end,
+                                preview: h.preview,
+                            })
+                            .collect(),
+                    );
                 }
             }
             SearchEvent::Done {
@@ -1409,182 +1412,6 @@ impl App {
                 rc.borrow_mut().search_progress = None;
                 self.report("已取消搜索");
             }
-        }
-    }
-
-    // ---- 搜索结果面板 ----
-
-    pub(super) fn create_results(&self, hwnd: HWND) {
-        let class = wide("SysListView32");
-        let empty = wide("");
-        let list = unsafe {
-            CreateWindowExW(
-                0,
-                class.as_ptr(),
-                empty.as_ptr(),
-                WS_CHILD
-                    | WS_TABSTOP
-                    | LVS_REPORT
-                    | LVS_SINGLESEL
-                    | LVS_SHOWSELALWAYS
-                    | LVS_OWNERDATA,
-                0,
-                0,
-                0,
-                0,
-                hwnd,
-                ID_RESULTS as *mut core::ffi::c_void,
-                self.hinstance,
-                null(),
-            )
-        };
-        self.results.set(list);
-        let p = &GRUVBOX_LIGHT;
-        let explorer = wide("Explorer");
-        unsafe {
-            windows_sys::Win32::UI::Controls::SetWindowTheme(list, explorer.as_ptr(), null());
-            let ex = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER;
-            SendMessageW(list, LVM_SETEXTENDEDLISTVIEWSTYLE, ex, ex as isize);
-            for (i, (title, w)) in [("行", 90), ("内容", 4000)].iter().enumerate() {
-                let t = wide(title);
-                let mut col: LVCOLUMNW = std::mem::zeroed();
-                col.mask = LVCF_WIDTH | 0x4; // LVCF_TEXT
-                col.cx = *w * self.dpi.get() as i32 / 96;
-                col.pszText = t.as_ptr() as *mut u16;
-                SendMessageW(list, LVM_INSERTCOLUMNW, i, &col as *const _ as isize);
-            }
-            SendMessageW(list, LVM_SETBKCOLOR, 0, theme::bgr(p.bg0_s));
-            SendMessageW(list, LVM_SETTEXTBKCOLOR, 0, CLR_NONE);
-            SendMessageW(list, LVM_SETTEXTCOLOR, 0, theme::bgr(p.fg1));
-        }
-    }
-
-    pub(super) fn show_results(&self, on: bool) {
-        let list = self.results.get();
-        if list.is_null() || self.results_shown.get() == on {
-            return;
-        }
-        self.results_shown.set(on);
-        unsafe {
-            SendMessageW(list, 0x0030, self.side_font.get() as usize, 1); // WM_SETFONT
-            ShowWindow(list, if on { SW_SHOW } else { SW_HIDE });
-        }
-        self.layout();
-    }
-
-    pub(super) fn toggle_results(&self) {
-        self.show_results(!self.results_shown.get());
-    }
-
-    /// 编辑区高度扣掉结果面板后的高度；同时摆放面板。
-    pub(super) fn layout_results(&self, left: i32, width: i32, height: i32) -> i32 {
-        let list = self.results.get();
-        if list.is_null() || !self.results_shown.get() {
-            return height;
-        }
-        let dpi = self.dpi.get() as i32;
-        let gap = 5 * dpi / 96;
-        let h = (200 * dpi / 96).min(height / 2);
-        unsafe { MoveWindow(list, left, height - h, width, h, 1) };
-        (height - h - gap).max(0)
-    }
-
-    fn results_count_changed(&self) {
-        let n = self.results_items.borrow().len();
-        unsafe {
-            SendMessageW(self.results.get(), LVM_SETITEMCOUNT, n, 2); // LVSICF_NOSCROLL
-        }
-    }
-
-    /// 结果列表的通知。
-    pub(super) fn on_results_notify(&self, lp: LPARAM) -> Option<LRESULT> {
-        let hdr = unsafe { &*(lp as *const NMHDR) };
-        match hdr.code {
-            LVN_GETDISPINFOW => {
-                let di = unsafe { &mut *(lp as *mut NMLVDISPINFOW) };
-                if di.item.mask & LVIF_TEXT == 0 {
-                    return Some(0);
-                }
-                let text = {
-                    let items = self.results_items.borrow();
-                    let Some(h) = items.get(di.item.iItem as usize) else {
-                        return Some(0);
-                    };
-                    if di.item.iSubItem == 0 {
-                        h.line
-                            .map(|l| (l + 1).to_string())
-                            .unwrap_or_else(|| "—".into())
-                    } else {
-                        h.preview.clone()
-                    }
-                };
-                Self::copy_to_wide_buf(&text, di.item.pszText, di.item.cchTextMax);
-                Some(0)
-            }
-            NM_DBLCLK => {
-                let nm = unsafe { &*(lp as *const NMITEMACTIVATE) };
-                if nm.iItem >= 0 {
-                    self.jump_to_hit(nm.iItem as usize);
-                }
-                Some(0)
-            }
-            NM_RETURN => {
-                let i = unsafe {
-                    SendMessageW(
-                        self.results.get(),
-                        LVM_GETNEXTITEM,
-                        usize::MAX,
-                        LVNI_SELECTED as isize,
-                    )
-                };
-                if i >= 0 {
-                    self.jump_to_hit(i as usize);
-                }
-                Some(0)
-            }
-            LVN_KEYDOWN => {
-                let nm = unsafe { &*(lp as *const NMKEYDOWN) };
-                let vk = nm.wVKey;
-                if vk == 0x1B {
-                    self.show_results(false);
-                    if let Some(s) = self.sci() {
-                        unsafe { SetFocus(s.hwnd()) };
-                    }
-                }
-                Some(0)
-            }
-            _ => None,
-        }
-    }
-
-    fn jump_to_hit(&self, i: usize) {
-        let Some(hit) = self.results_items.borrow().get(i).cloned() else {
-            return;
-        };
-        let doc = self.results_doc.get();
-        if self.with_doc(doc, |_| ()).is_none() {
-            self.show_message("搜索结果所属的文档已关闭");
-            return;
-        }
-        self.activate(doc);
-        let Some(rc) = self.overlay_of(doc) else {
-            return;
-        };
-        let vis = Self::vis_for(&rc);
-        rc.borrow_mut().select(hit.start, hit.end, vis);
-        lview::reveal(&rc);
-        if let Some(s) = self.sci() {
-            unsafe { SetFocus(s.hwnd()) };
-        }
-        self.update_status();
-    }
-
-    /// 关闭文档时清理属于它的搜索结果。
-    pub(super) fn drop_results_of(&self, id: u32) {
-        if self.results_doc.get() == id {
-            self.results_items.borrow_mut().clear();
-            self.results_count_changed();
-            self.results_doc.set(0);
         }
     }
 
@@ -1733,7 +1560,15 @@ impl App {
         self.results_items
             .borrow()
             .iter()
-            .map(|h| (h.line, h.start, h.preview.clone()))
+            .filter_map(|h| match h {
+                drawer::ResultItem::Large {
+                    line,
+                    start,
+                    preview,
+                    ..
+                } => Some((*line, *start, preview.clone())),
+                _ => None,
+            })
             .collect()
     }
 

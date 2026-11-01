@@ -422,7 +422,8 @@ mod tests {
         std::fs::write(d.join("node_modules/x/c.rs"), "needle").unwrap();
         std::fs::write(d.join("target/d.rs"), "needle").unwrap();
         std::fs::write(d.join(".gitignore"), "target/\n").unwrap();
-        std::fs::write(d.join("bin.dat"), b"needle\0\x01\x02").unwrap();
+        // NUL 在奇偶位置上均衡，不会被当成 UTF-16
+        std::fs::write(d.join("bin.dat"), b"needle\0\0\x01\x02\0\0\x03\x04").unwrap();
         std::fs::write(d.join("secret.hne"), b"HURSHENC needle").unwrap();
         let gbk_text = "这是一段用于测试简体中文编码识别的文字，需要足够长。\n中文 needle 测试\n";
         let (gbk, _, _) = encoding::encoding_rs::GBK.encode(gbk_text);

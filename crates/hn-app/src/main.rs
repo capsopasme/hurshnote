@@ -17,6 +17,8 @@ mod ctl;
 #[cfg(windows)]
 mod dialogs;
 #[cfg(windows)]
+mod dirdlg;
+#[cfg(windows)]
 mod dlg;
 #[cfg(windows)]
 mod docs;
@@ -36,6 +38,8 @@ mod pwdlg;
 mod selftest;
 #[cfg(windows)]
 mod statusbar;
+#[cfg(windows)]
+mod term;
 #[cfg(windows)]
 mod watcher;
 #[cfg(windows)]
