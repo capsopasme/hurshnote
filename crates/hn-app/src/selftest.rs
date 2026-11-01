@@ -806,8 +806,9 @@ fn dev_checks(app: &App, dir: &std::path::Path, check: &mut dyn FnMut(&str, bool
             let completed = v
                 .as_ref()
                 .is_some_and(|v| wait_until(10_000, || v.text().contains("Get-ChildItem")));
-            // Esc 清掉补全后的输入行，再输出中文
-            crate::term::write(id, "\x1becho 中文hn\r".as_bytes().to_vec());
+            // 执行补全出的命令，再输出中文（ESC 紧跟字符会被当成 Alt 组合键，不能用来清行）
+            crate::term::write(id, b"\r".to_vec());
+            crate::term::write(id, "echo 中文hn\r".as_bytes().to_vec());
             let chinese = v
                 .as_ref()
                 .is_some_and(|v| wait_until(10_000, || v.text().matches("中文hn").count() >= 2));
