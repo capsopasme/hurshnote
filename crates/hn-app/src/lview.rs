@@ -800,11 +800,15 @@ impl LargeView {
             *self.doc.borrow_mut() = Some((id, d));
             self.painted.borrow_mut().clear();
         }
-        if !self.is_shown() {
+        let shown = self.is_shown();
+        if !shown {
             unsafe { ShowWindow(self.hwnd.get(), SW_SHOW) };
         }
-        self.update_vis();
-        self.refresh();
+        // refresh() 经常调用到这里，内容没变时不重绘
+        if !same || !shown {
+            self.update_vis();
+            self.refresh();
+        }
     }
 
     pub fn hide(&self) {
