@@ -572,6 +572,7 @@ impl App {
         tail: bool,
         forced: Option<TextEncoding>,
     ) -> Option<u32> {
+        let t = Instant::now();
         let mut ld = match LargeDoc::open(path, forced, &self.hints) {
             Ok(d) => d,
             Err(e) => {
@@ -579,13 +580,16 @@ impl App {
                 return None;
             }
         };
+        lview::record("doc_open_ms", t);
         if hex {
             ld.mode = Mode::Hex;
         }
         ld.tail = tail;
         let pristine = self.pristine_untitled();
         let id = self.install_large(ld, path)?;
+        let t = Instant::now();
         self.activate(id);
+        lview::record("activate_ms", t);
         if let Some(p) = pristine {
             if p != id {
                 self.close_doc_unchecked(p);

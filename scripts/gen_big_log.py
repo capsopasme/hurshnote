@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -42,6 +43,9 @@ def main() -> int:
             f.write(data)
             written += len(data)
             block += 1
+        # 等系统把脏页写完，避免性能测试时与后台写回争抢磁盘
+        f.flush()
+        os.fsync(f.fileno())
     secs = time.time() - start
     print(f"写入 {written / 1048576:.0f} MB，用时 {secs:.1f} s")
     return 0

@@ -39,7 +39,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::win::*;
 
 /// 打开时用于嗅探编码的字节数。
-pub const SNIFF: usize = 1 << 20;
+pub const SNIFF: usize = 256 * 1024;
 /// 一次最多复制的字节数。
 pub const COPY_LIMIT: u64 = 64 << 20;
 const SCROLL_MAX: i32 = 65535;
@@ -622,7 +622,7 @@ thread_local! {
     static TIMINGS: RefCell<Vec<(&'static str, f64)>> = const { RefCell::new(Vec::new()) };
 }
 
-fn record(name: &'static str, start: std::time::Instant) {
+pub fn record(name: &'static str, start: std::time::Instant) {
     let ms = start.elapsed().as_secs_f64() * 1000.0;
     TIMINGS.with(|t| {
         let mut t = t.borrow_mut();
