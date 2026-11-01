@@ -2,7 +2,7 @@
 //!
 //! 直接按 commctrl.h 定义，避免依赖 windows-sys 中随版本变化的类型与特性开关。
 
-#![allow(dead_code, non_snake_case)]
+#![allow(dead_code, non_snake_case, clippy::upper_case_acronyms)]
 
 use windows_sys::Win32::Foundation::{HWND, POINT};
 
