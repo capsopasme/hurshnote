@@ -1,0 +1,12 @@
+[package]
+name = "hn-large"
+description = "HurshNote 大文件核心：分块读取与块缓存、稀疏行索引、显示行导航、流式搜索、Hex、Tail（跨平台，只依赖 std）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

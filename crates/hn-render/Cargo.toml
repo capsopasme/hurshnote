@@ -1,0 +1,19 @@
+[package]
+name = "hn-render"
+description = "HurshNote 共享渲染设施：Direct2D / DirectWrite 封装（大文件视图、Hex 视图，之后的终端与 Markdown 预览共用）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_DirectWrite",
+  "Win32_Graphics_Dxgi_Common",
+] }
+
+[lints]
+workspace = true

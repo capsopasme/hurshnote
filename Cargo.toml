@@ -15,7 +15,11 @@ hn-sci = { path = "crates/hn-sci" }
 hn-search = { path = "crates/hn-search" }
 hn-crypto = { path = "crates/hn-crypto" }
 hn-core = { path = "crates/hn-core" }
+hn-large = { path = "crates/hn-large" }
+hn-render = { path = "crates/hn-render" }
 windows-sys = "0.59"
+# 只用于 COM 接口（Direct2D / DirectWrite），普通 Win32 API 用 windows-sys
+windows = "0.58"
 cc = "1"
 embed-resource = "2.5"
 encoding_rs = "0.8"
