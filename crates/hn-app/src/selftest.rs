@@ -850,3 +850,70 @@ pub fn run_large(app: &App, file: &std::path::Path) -> String {
     app.st_close_active();
     out
 }
+
+/// `--bench-dirsearch <目录> <查找内容> <输出>`：目录搜索基准（不创建窗口）。
+/// 先预热一次（让文件进入系统缓存），再测 3 次取中位数，与 ripgrep 对比用。
+pub fn bench_dir(dir: &std::path::Path, pattern: &str, out: &std::path::Path) -> i32 {
+    use hn_search::dir::{search_dir, DirQuery};
+    use std::sync::atomic::AtomicBool;
+    let mut q = DirQuery::new(
+        vec![dir.to_path_buf()],
+        pattern,
+        Options {
+            mode: Mode::Normal,
+            case_sensitive: true,
+            ..Default::default()
+        },
+    );
+    q.exclude.clear();
+    let cancel = AtomicBool::new(false);
+    let mut report = String::new();
+    let mut times = Vec::new();
+    let mut last = None;
+    for i in 0..4 {
+        let t = std::time::Instant::now();
+        let r = search_dir(
+            &q,
+            &cancel,
+            std::time::Duration::from_millis(200),
+            &|_, _| {},
+        );
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        match r {
+            Ok(p) => {
+                if i > 0 {
+                    times.push(ms);
+                }
+                last = Some(p);
+            }
+            Err(e) => {
+                let _ = writeln!(report, "error={e}");
+                break;
+            }
+        }
+    }
+    times.sort_by(|a, b| a.total_cmp(b));
+    if let (Some(p), Some(median)) = (last, times.get(times.len() / 2)) {
+        let _ = writeln!(report, "dirsearch_ms={median:.1}");
+        let _ = writeln!(
+            report,
+            "dirsearch_runs={}",
+            times
+                .iter()
+                .map(|t| format!("{t:.1}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let _ = writeln!(report, "files_scanned={}", p.files_scanned);
+        let _ = writeln!(report, "files_matched={}", p.files_matched);
+        let _ = writeln!(report, "matches={}", p.matches);
+        let _ = writeln!(report, "skipped_binary={}", p.skipped_binary);
+        report.push_str("result=pass\n");
+    } else {
+        report.push_str("result=fail\n");
+    }
+    match std::fs::write(out, report) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}

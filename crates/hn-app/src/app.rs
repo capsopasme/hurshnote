@@ -235,6 +235,9 @@ pub fn run() -> i32 {
     let cwd = std::env::current_dir().unwrap_or_default();
     let args = instance::parse(raw_args.clone(), &cwd);
 
+    if let Some((dir, pattern, out)) = &args.dir_bench {
+        return crate::selftest::bench_dir(dir, pattern, out);
+    }
     if let Some((tmp, target)) = &args.elevated_save {
         return crate::fsio::run_elevated_helper(tmp, target);
     }

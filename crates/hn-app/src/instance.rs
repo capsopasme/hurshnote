@@ -36,11 +36,13 @@ pub struct Args {
     pub elevated_save: Option<(PathBuf, PathBuf)>,
     /// 大文件性能测试：要打开的文件（输出文件放在 `selftest` 中）
     pub large_test: Option<PathBuf>,
+    /// 目录搜索基准：(目录, 查找内容, 输出文件)
+    pub dir_bench: Option<(PathBuf, String, PathBuf)>,
 }
 
 /// 解析参数。支持：`文件...`、`-n<行>`、`-c<列>`、`-ro`、`-multiInst`、`-nosession`、
 /// `--selftest <输出>`、`--selftest-large <文件> <输出>`、`--selftest-session <阶段> <标记> <输出>`、
-/// `--elevated-save <临时文件> <目标>`。
+/// `--bench-dirsearch <目录> <查找内容> <输出>`、`--elevated-save <临时文件> <目标>`。
 pub fn parse(args: Vec<OsString>, cwd: &Path) -> Args {
     let mut a = Args::default();
     let mut it = args.into_iter();
@@ -64,6 +66,15 @@ pub fn parse(args: Vec<OsString>, cwd: &Path) -> Args {
                 .unwrap_or_default();
             let out = it.next().map(PathBuf::from).unwrap_or_default();
             a.session_test = Some((phase, marker, out));
+            a.multi_inst = true;
+        } else if s == "--bench-dirsearch" {
+            if let (Some(d), Some(p), Some(o)) = (it.next(), it.next(), it.next()) {
+                a.dir_bench = Some((
+                    PathBuf::from(d),
+                    p.to_string_lossy().into_owned(),
+                    PathBuf::from(o),
+                ));
+            }
             a.multi_inst = true;
         } else if s == "--elevated-save" {
             if let (Some(t), Some(d)) = (it.next(), it.next()) {

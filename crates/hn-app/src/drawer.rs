@@ -331,7 +331,9 @@ impl App {
             .copied();
         match term {
             Some(t) => self.show_page(t, true),
-            None => self.new_terminal(None),
+            None => {
+                self.new_terminal(None);
+            }
         }
     }
 
