@@ -627,7 +627,7 @@ pub fn run_large(app: &App, file: &std::path::Path) -> String {
     let len = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
     writeln!(out, "file_mb={:.0}", len as f64 / 1048576.0).unwrap();
 
-    // 测量前先让系统把测试文件开头读进缓存之外的状态保持一致：不预热，按真实首次打开测量
+    // 不预热：按真实的首次打开测量
     let t0 = Instant::now();
     let id = app.st_open_large(file, false, false);
     let open = t0.elapsed().as_secs_f64() * 1000.0;
