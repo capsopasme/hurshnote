@@ -1046,7 +1046,11 @@ impl LargeView {
         let mut max_w = 0f32;
         let x = tx - d.x_off;
         let mut r = d.top;
+        let t_rows = std::time::Instant::now();
+        let mut t_read = 0f64;
+        let mut t_layout = 0f64;
         for i in 0..rows {
+            let t = std::time::Instant::now();
             let row = nav.row(r);
             if i > 0 && row.line_start {
                 line = line.map(|l| l + 1);
@@ -1055,8 +1059,11 @@ impl LargeView {
             let bytes = d
                 .reader
                 .read(row.start, (row.content_end - row.start) as usize);
+            t_read += t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
             let text = decode::decode_row(&bytes, d.cs, legacy);
             let layout = TextLayout::new(&text.text, font).ok();
+            t_layout += t.elapsed().as_secs_f64();
             let tw = layout.as_ref().map_or(0.0, |l| l.width);
             max_w = max_w.max(tw);
             let xa = |pos: u64| -> f32 {
@@ -1110,6 +1117,14 @@ impl LargeView {
                 None => break,
             }
         }
+        record("first_rows_ms", t_rows);
+        TIMINGS.with(|t| {
+            let mut t = t.borrow_mut();
+            if !t.iter().any(|(k, _)| *k == "first_rows_read_ms") {
+                t.push(("first_rows_read_ms", t_read * 1000.0));
+                t.push(("first_rows_layout_ms", t_layout * 1000.0));
+            }
+        });
         *self.painted.borrow_mut() = painted;
         self.max_w.set(max_w + tx + cw * 4.0);
     }
