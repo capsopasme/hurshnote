@@ -2056,6 +2056,10 @@ impl App {
                             .unwrap_or(true);
                         theme::update_line_number_width(sci, show);
                     }
+                    // 预览可能显示的是这个视图的文档
+                    if n.updated & SC_UPDATE_V_SCROLL as i32 != 0 {
+                        self.md_editor_scrolled();
+                    }
                 }
                 SCN_SAVEPOINTREACHED | SCN_SAVEPOINTLEFT => {
                     let id = self.view_doc[view].get();

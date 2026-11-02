@@ -2,8 +2,8 @@
 //!
 //! 预览窗口本身（排版、绘制、选择）在 `crate::mdview`。
 //!
-//! - 显示条件：设置中打开了预览，焦点视图的文档语言是 Markdown，且不是大文件视图 / Hex 视图
-//! - 预览跟随焦点视图中的文档；切换文档或重新载入（文档指针变化）时立即同步解析，编辑时防抖 150 ms 后台解析
+//! - 显示条件：设置中打开了预览，焦点视图（分屏时也看另一视图）的文档语言是 Markdown，且不是大文件视图 / Hex 视图
+//! - 预览优先跟随焦点视图中的文档；切换文档或重新载入（文档指针变化）时立即同步解析，编辑时防抖 150 ms 后台解析
 //! - 滚动同步：编辑器滚动 → 预览按源码行定位；用户滚动预览 → 编辑器跟随。用户滚动预览后的 200 ms 内
 //!   忽略编辑器发来的滚动通知，避免两边来回拉扯
 
@@ -21,7 +21,24 @@ const DEBOUNCE_MS: u32 = 150;
 const GUARD_MS: u64 = 200;
 
 impl App {
-    /// 应当显示预览的文档（焦点视图中的 Markdown 文档）。
+    /// 文档是否可以预览：已载入的 Markdown 文档，不是大文件/Hex 视图，不是长行模式。
+    fn md_previewable(&self, id: u32) -> bool {
+        if id == 0 || self.overlay_of(id).is_some() {
+            return false;
+        }
+        self.docs
+            .try_borrow()
+            .ok()
+            .and_then(|docs| {
+                docs.iter()
+                    .find(|d| d.id == id)
+                    .map(|d| d.ptr != 0 && !d.long_lines && LANGS[d.lang].id == "markdown")
+            })
+            .unwrap_or(false)
+    }
+
+    /// 应当预览的文档：优先焦点视图中的文档；分屏时焦点视图不是 Markdown 而另一视图是，就预览另一视图的
+    /// （在两个视图之间点来点去时预览不会忽隐忽现）。
     fn md_wanted(&self) -> Option<u32> {
         if !self
             .settings
@@ -31,18 +48,28 @@ impl App {
         {
             return None;
         }
-        if self.active_overlay().is_some() {
-            return None;
+        let focus = self.focus.get();
+        let mut views = vec![focus];
+        if self.split.get() != 0 {
+            views.push(1 - focus);
         }
-        let id = self.active.get();
-        let ok = self
-            .docs
-            .try_borrow()
-            .ok()?
-            .iter()
-            .find(|d| d.id == id)
-            .map(|d| d.ptr != 0 && !d.long_lines && LANGS[d.lang].id == "markdown")?;
-        ok.then_some(id)
+        views
+            .into_iter()
+            .map(|i| self.view_doc[i].get())
+            .find(|&id| self.md_previewable(id))
+    }
+
+    /// 显示文档 `id` 的编辑视图（优先焦点视图）。
+    fn md_view_of(&self, id: u32) -> Option<Sci> {
+        let focus = self.focus.get();
+        let mut order = vec![focus];
+        if self.split.get() != 0 {
+            order.push(1 - focus);
+        }
+        order
+            .into_iter()
+            .find(|&i| self.view_doc[i].get() == id)
+            .and_then(|i| self.views[i].get())
     }
 
     /// 按当前文档显示或隐藏预览；文档变化时立即同步内容。由 `refresh` 调用。
@@ -74,7 +101,7 @@ impl App {
         if v.doc_id() != id || self.md_ptr.get() != ptr {
             self.md_ptr.set(ptr);
             self.md_apply_style();
-            self.md_push_source(true, true);
+            self.md_push_source(id, true, true);
             self.md_editor_scrolled();
         }
     }
@@ -151,12 +178,11 @@ impl App {
         });
     }
 
-    /// 把焦点视图中文档的文本交给预览。`sync` 为真时立即解析（切换文档时避免闪烁）。
-    pub(super) fn md_push_source(&self, sync: bool, reset_scroll: bool) {
-        let (Some(v), Some(sci)) = (mdview::view(), self.sci()) else {
+    /// 把文档 `id` 的文本交给预览。`sync` 为真时立即解析（切换文档时避免闪烁）。
+    pub(super) fn md_push_source(&self, id: u32, sync: bool, reset_scroll: bool) {
+        let (Some(v), Some(sci)) = (mdview::view(), self.md_view_of(id)) else {
             return;
         };
-        let id = self.active.get();
         let base = self
             .with_doc(id, |d| {
                 d.path
@@ -182,23 +208,21 @@ impl App {
 
     pub(super) fn md_on_timer(&self) {
         unsafe { KillTimer(self.hwnd(), TIMER_MD) };
-        if self.md_visible.get() && mdview::view().is_some_and(|v| v.doc_id() == self.active.get())
-        {
-            self.md_push_source(false, false);
+        let id = mdview::view().map(|v| v.doc_id()).unwrap_or(0);
+        if self.md_visible.get() && self.md_view_of(id).is_some() {
+            self.md_push_source(id, false, false);
         }
     }
 
-    /// 编辑器（焦点视图）滚动后：预览跟随。
+    /// 显示预览文档的编辑视图滚动后：预览跟随。
     pub(super) fn md_editor_scrolled(&self) {
         if !self.md_visible.get() || unsafe { GetTickCount64() } < self.md_guard.get() {
             return;
         }
-        let (Some(v), Some(sci)) = (mdview::view(), self.sci()) else {
+        let Some(v) = mdview::view() else { return };
+        let Some(sci) = self.md_view_of(v.doc_id()) else {
             return;
         };
-        if v.doc_id() != self.active.get() {
-            return;
-        }
         let first = sci.send(SCI_GETFIRSTVISIBLELINE, 0, 0).max(0) as usize;
         let doc_line = sci.send(SCI_DOCLINEFROMVISIBLE, first, 0).max(0) as usize;
         let vis_start = sci.send(SCI_VISIBLEFROMDOCLINE, doc_line, 0).max(0) as usize;
@@ -219,12 +243,10 @@ impl App {
 
     /// 用户滚动了预览：编辑器跟随。
     pub(crate) fn md_user_scrolled(&self) {
-        let (Some(v), Some(sci)) = (mdview::view(), self.sci()) else {
+        let Some(v) = mdview::view() else { return };
+        let Some(sci) = self.md_view_of(v.doc_id()) else {
             return;
         };
-        if v.doc_id() != self.active.get() {
-            return;
-        }
         self.md_guard.set(unsafe { GetTickCount64() } + GUARD_MS);
         let (line, at_end) = v.top_line();
         let target = if at_end {
@@ -307,7 +329,8 @@ impl App {
 
     /// 自测：立即把编辑中的文本交给预览（同步解析）。
     pub(crate) fn st_md_push(&self) {
-        self.md_push_source(true, false);
+        let id = mdview::view().map(|v| v.doc_id()).unwrap_or(0);
+        self.md_push_source(id, true, false);
     }
 
     pub(crate) fn st_md_editor_scrolled(&self) {

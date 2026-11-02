@@ -1106,9 +1106,9 @@ fn m6_checks(
         i += 1;
     }
     set_text(&sci, &big);
-    app.st_set_language("markdown");
+    // 切换为 Markdown 时预览立即解析并完成首次排版（每个块都要排版）
     let t = std::time::Instant::now();
-    app.st_md_push();
+    app.st_set_language("markdown");
     let full_ms = t.elapsed().as_secs_f64() * 1000.0;
     let (bb, _, total_big, _) = v.st_stats();
     let mid = sci.line_start(sci.line_count() / 2);
