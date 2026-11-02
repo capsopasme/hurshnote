@@ -1106,11 +1106,24 @@ fn m6_checks(
         i += 1;
     }
     set_text(&sci, &big);
-    // 切换为 Markdown 时预览立即解析并完成首次排版（每个块都要排版）
+    // 切换为 Markdown 时预览立即解析，在时间预算内排版一部分（其余用估计高度），空闲时补齐
     let t = std::time::Instant::now();
     app.st_set_language("markdown");
-    let full_ms = t.elapsed().as_secs_f64() * 1000.0;
-    let (bb, _, total_big, _) = v.st_stats();
+    let first_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let (bb, built_first, _, _) = v.st_stats();
+    let t = std::time::Instant::now();
+    v.st_finish_layout();
+    let rest_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let (_, built_all, total_big, _) = v.st_stats();
+    metrics.push(format!("md_first_ms={first_ms:.1}"));
+    metrics.push(format!("md_full_ms={:.1}", first_ms + rest_ms));
+    check(
+        "md_progressive",
+        built_first < bb && built_all == bb && first_ms < 200.0,
+        &format!(
+            "blocks={bb} first_built={built_first} all_built={built_all} first={first_ms:.0}ms"
+        ),
+    );
     let mid = sci.line_start(sci.line_count() / 2);
     sci.set_sel(mid, mid);
     sci.send_str(SCI_REPLACESEL, 0, "插入");
@@ -1119,12 +1132,11 @@ fn m6_checks(
     let edit_ms = t.elapsed().as_secs_f64() * 1000.0;
     let (_, _, _, rebuilt_big) = v.st_stats();
     metrics.push(format!("md_blocks_100k={bb}"));
-    metrics.push(format!("md_full_ms={full_ms:.1}"));
     metrics.push(format!("md_edit_ms={edit_ms:.1}"));
     check(
         "md_large",
         bb > 1000 && rebuilt_big <= 3,
-        &format!("blocks={bb} rebuilt={rebuilt_big} full={full_ms:.0}ms edit={edit_ms:.0}ms"),
+        &format!("blocks={bb} rebuilt={rebuilt_big} edit={edit_ms:.0}ms"),
     );
     sci.send(SCI_SETFIRSTVISIBLELINE, sci.line_count() / 2, 0);
     app.st_md_editor_scrolled();

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use hn_md::{Block, Document, Inline, Kind, Marker, Style};
 use hn_render::{Align, Bitmap, RichText, Surface, TextFormat};
@@ -43,6 +44,12 @@ pub const WM_APP_MD: u32 = WM_APP + 30;
 /// 超过此大小的文档不预览
 pub const MAX_SOURCE: usize = 16 << 20;
 const TIMER_AUTOSCROLL: usize = 1;
+/// 空闲时继续排版
+const TIMER_LAYOUT: usize = 2;
+/// 一次同步排版的时间预算：超出后其余块先用估计高度，空闲时分批补齐（打开 10 万字的文档不卡界面）
+const LAYOUT_BUDGET: Duration = Duration::from_millis(25);
+/// 空闲时每批排版的时间
+const IDLE_CHUNK: Duration = Duration::from_millis(12);
 const IDC_HAND: u16 = 32649;
 const IDC_ARROW_: u16 = 32512;
 
@@ -211,7 +218,12 @@ enum Content {
 }
 
 struct Laid {
-    content: Rc<Content>,
+    /// 排版结果；None 表示还没排版，`h` 是估计高度（空闲时补齐）
+    content: Option<Rc<Content>>,
+    /// 缓存键（内容哈希、宽度、字体代号）
+    key: (u64, u32, u64),
+    /// 排版失败（不再重试）
+    failed: bool,
     marker: Option<Rc<RichText>>,
     x: f32,
     w: f32,
@@ -219,6 +231,9 @@ struct Laid {
     h: f32,
     /// 与上一块的间距（引用竖线跨越用）
     gap: f32,
+    /// 上、下外边距
+    mt: f32,
+    mb: f32,
 }
 
 /// 选择位置：块下标 + 块内位置（文字块为 UTF-16 下标；其他块 0 = 开头、1 = 结尾）。
@@ -610,6 +625,33 @@ fn build_marker(m: &Marker, fonts: &Fonts) -> Option<RichText> {
     Some(rt)
 }
 
+/// 还没排版的块的估计高度（按字符数粗算：中日韩字符 1 em，其他 0.55 em）。
+fn estimate_height(b: &Block, bw: f32, fonts: &Fonts) -> f32 {
+    let em = fonts.em();
+    let text_h = |text: &str, fmt: &TextFormat| {
+        let width: f32 = text
+            .chars()
+            .map(|c| if c as u32 >= 0x1100 { 1.0 } else { 0.55 })
+            .sum::<f32>()
+            * fmt.size;
+        let lines = (width / bw.max(1.0)).ceil().max(1.0) + text.matches('\n').count() as f32;
+        lines * fmt.line_h
+    };
+    match &b.kind {
+        Kind::Para(i) => text_h(&i.text, &fonts.body),
+        Kind::Heading(l, i) => {
+            let lv = (*l).clamp(1, 6) as usize;
+            text_h(&i.text, &fonts.heads[lv - 1]) + if lv <= 2 { em * 0.35 + 1.0 } else { 0.0 }
+        }
+        Kind::Code { text, .. } | Kind::Html(text) => {
+            text.lines().count().max(1) as f32 * fonts.code.line_h + 2.0 * em * 0.6
+        }
+        Kind::Rule => em,
+        Kind::Table(t) => (t.rows.len() + 1) as f32 * (fonts.cell.line_h + em * 0.6) + 1.0,
+        Kind::Image { .. } => fonts.body.line_h * 1.6,
+    }
+}
+
 /// 块的上、下外边距。
 fn margins(b: &Block, first: bool, em: f32) -> (f32, f32) {
     match &b.kind {
@@ -626,6 +668,58 @@ fn margins(b: &Block, first: bool, em: f32) -> (f32, f32) {
         Kind::Para(_) if b.compact => (0.0, em * 0.15),
         Kind::Para(_) => (0.0, em * 0.7),
         _ => (0.0, em * 0.8),
+    }
+}
+
+impl State {
+    /// 已排版内容的高度。
+    fn measured_height(&self, c: &Content, fonts: &Fonts, bw: f32) -> f32 {
+        let em = fonts.em();
+        let h = match c {
+            Content::Text(TextKind::Para, tb) => tb.rt.height,
+            Content::Text(TextKind::Heading(l), tb) => {
+                tb.rt.height + if *l <= 2 { em * 0.35 + 1.0 } else { 0.0 }
+            }
+            Content::Text(_, tb) => tb.rt.height + 2.0 * em * 0.6,
+            Content::Rule => em,
+            Content::Table(t) => t.rows.iter().sum::<f32>() + 1.0,
+            Content::Image { src, .. } => {
+                let path = MdView::image_path(self.base.as_deref(), src);
+                let scale = self.spec.as_ref().map(|x| x.px_scale).unwrap_or(1.0);
+                match path
+                    .as_ref()
+                    .and_then(|p| self.images.get(p))
+                    .map(|e| &e.state)
+                {
+                    Some(ImgState::Ready { orig, .. }) => {
+                        let (iw, ih) = (orig.0 as f32 * scale, orig.1 as f32 * scale);
+                        let k = (bw / iw.max(1.0)).min(1.0);
+                        (ih * k).max(1.0)
+                    }
+                    _ => fonts.body.line_h * 1.6,
+                }
+            }
+        };
+        h.ceil()
+    }
+
+    /// 按各块高度与外边距计算纵坐标与内容总高。
+    fn place(&mut self, em: f32) {
+        let mut y = em * 0.8;
+        let mut prev_mb = 0f32;
+        for (i, l) in self.laid.iter_mut().enumerate() {
+            let gap = if i == 0 { 0.0 } else { prev_mb.max(l.mt) };
+            y += gap;
+            l.gap = gap;
+            l.y = y;
+            y += l.h;
+            prev_mb = l.mb;
+        }
+        self.total_h = y + prev_mb + em * 2.0;
+    }
+
+    fn pending(&self) -> bool {
+        self.laid.iter().any(|l| l.content.is_none() && !l.failed)
     }
 }
 
@@ -880,128 +974,198 @@ impl MdView {
         }
     }
 
-    /// 按需（宽度、字体、文档变化后）重新排版。
+    /// 按需（宽度、字体、文档变化后）重新排版。命中缓存的块直接复用；其余块在时间预算内排版，
+    /// 超出预算的先用估计高度，由空闲定时器分批补齐（绘制前会先补齐可见的块）。
     fn ensure_layout(&self) {
         let (w, h) = client(self.hwnd.get());
         if w < 1.0 {
             return;
         }
-        let mut st = self.st.borrow_mut();
-        if st.layout_w == w && !st.laid.is_empty() {
-            return;
-        }
-        if st.layout_w == w && st.doc.blocks.is_empty() {
-            return;
-        }
-        let Some(spec) = st.spec.clone() else { return };
-        // 只是宽度变了（文档没换）：重新折行后保持顶部的源码行不变
-        let anchor = (st.layout_w > 0.0
-            && !st.reset_scroll
-            && st.scroll > 0.0
-            && st.laid.len() == st.doc.blocks.len())
-        .then(|| Self::line_for_y(&st, st.scroll));
-        if st.fonts.is_none() {
-            st.fonts = Fonts::new(&spec).map(Rc::new);
-        }
-        let Some(fonts) = st.fonts.clone() else {
-            return;
+        let more = {
+            let mut guard = self.st.borrow_mut();
+            let st = &mut *guard;
+            if st.layout_w == w && (!st.laid.is_empty() || st.doc.blocks.is_empty()) {
+                return;
+            }
+            let Some(spec) = st.spec.clone() else { return };
+            // 只是宽度变了（文档没换）：重新折行后保持顶部的源码行不变
+            let anchor = (st.layout_w > 0.0
+                && !st.reset_scroll
+                && st.scroll > 0.0
+                && st.laid.len() == st.doc.blocks.len())
+            .then(|| Self::line_for_y(st, st.scroll));
+            if st.fonts.is_none() {
+                st.fonts = Fonts::new(&spec).map(Rc::new);
+            }
+            let Some(fonts) = st.fonts.clone() else {
+                return;
+            };
+            let em = fonts.em();
+            let pad_x = (em * 1.2).min(w * 0.08).max(4.0);
+            let indent_w = em * 1.8;
+            let quote_w = em * 1.1;
+            let doc = st.doc.clone();
+            let font_gen = st.font_gen;
+            let old_cache = std::mem::take(&mut st.cache);
+            let mut cache = HashMap::with_capacity(doc.blocks.len());
+            let mut laid = Vec::with_capacity(doc.blocks.len());
+            let mut rebuilt = 0;
+            let start = Instant::now();
+            for (i, b) in doc.blocks.iter().enumerate() {
+                let x = pad_x + b.quote as f32 * quote_w + b.indent as f32 * indent_w;
+                let bw = (w - x - pad_x).max(em * 3.0);
+                let key = (b.content_hash(), bw.to_bits(), font_gen);
+                let mut failed = false;
+                let content = match old_cache.get(&key).or_else(|| cache.get(&key)) {
+                    Some(c) => Some(Rc::clone(c)),
+                    None if start.elapsed() < LAYOUT_BUDGET => {
+                        rebuilt += 1;
+                        let c = build_content(b, bw, &fonts).map(Rc::new);
+                        failed = c.is_none();
+                        c
+                    }
+                    None => None,
+                };
+                if let Some(c) = &content {
+                    cache.insert(key, c.clone());
+                }
+                let marker = match &b.marker {
+                    Some(m) => match st.markers.get(m).cloned() {
+                        Some(r) => Some(r),
+                        None => {
+                            let r = build_marker(m, &fonts).map(Rc::new);
+                            if let Some(r) = &r {
+                                st.markers.insert(m.clone(), r.clone());
+                            }
+                            r
+                        }
+                    },
+                    None => None,
+                };
+                let (mt, mb) = margins(b, i == 0, em);
+                let bh = match &content {
+                    Some(c) => st.measured_height(c, &fonts, bw),
+                    None => estimate_height(b, bw, &fonts).ceil(),
+                };
+                laid.push(Laid {
+                    content,
+                    key,
+                    failed,
+                    marker,
+                    x,
+                    w: bw,
+                    y: 0.0,
+                    h: bh,
+                    gap: 0.0,
+                    mt,
+                    mb,
+                });
+            }
+            st.cache = cache;
+            st.laid = laid;
+            st.pad_x = pad_x;
+            st.layout_w = w;
+            st.place(em);
+            let max = (st.total_h - h).max(0.0);
+            if st.reset_scroll {
+                st.reset_scroll = false;
+                st.scroll = 0.0;
+            } else if let Some(line) = anchor {
+                st.scroll = Self::y_for_line(st, line);
+            }
+            st.scroll = st.scroll.clamp(0.0, max);
+            self.rebuilt.set(rebuilt);
+            st.pending()
         };
-        let em = fonts.em();
-        let pad_x = (em * 1.2).min(w * 0.08).max(4.0);
-        let pad_top = em * 0.8;
-        let indent_w = em * 1.8;
-        let quote_w = em * 1.1;
+        if more {
+            unsafe { SetTimer(self.hwnd.get(), TIMER_LAYOUT, 1, None) };
+        }
+    }
+
+    /// 排版尚未排版的块：`range` 为文档纵坐标范围（只排可见的，不限时间），None 时按顺序排到用完 `budget`。
+    /// 高度变化后保持顶部的源码行不变。返回是否还有没排版的块。
+    fn build_pending(&self, range: Option<(f32, f32)>, budget: Duration) -> bool {
+        let (_, h) = client(self.hwnd.get());
+        let mut guard = self.st.borrow_mut();
+        let st = &mut *guard;
+        let Some(fonts) = st.fonts.clone() else {
+            return false;
+        };
         let doc = st.doc.clone();
-        let font_gen = st.font_gen;
-        let old_cache = std::mem::take(&mut st.cache);
-        let mut cache = HashMap::with_capacity(doc.blocks.len());
-        let mut laid = Vec::with_capacity(doc.blocks.len());
-        let mut rebuilt = 0;
-        let mut y = pad_top;
-        let mut prev_mb = 0f32;
-        let base = st.base.clone();
-        for (i, b) in doc.blocks.iter().enumerate() {
-            let x = pad_x + b.quote as f32 * quote_w + b.indent as f32 * indent_w;
-            let bw = (w - x - pad_x).max(em * 3.0);
-            let key = (b.content_hash(), bw.to_bits(), font_gen);
-            let content = match old_cache.get(&key).or_else(|| cache.get(&key)) {
-                Some(c) => Rc::clone(c),
-                None => {
-                    rebuilt += 1;
-                    match build_content(b, bw, &fonts) {
-                        Some(c) => Rc::new(c),
-                        None => continue,
-                    }
-                }
-            };
-            cache.insert(key, content.clone());
-            let marker = match &b.marker {
-                Some(m) => match st.markers.get(m).cloned() {
-                    Some(r) => Some(r),
-                    None => {
-                        let r = build_marker(m, &fonts).map(Rc::new);
-                        if let Some(r) = &r {
-                            st.markers.insert(m.clone(), r.clone());
-                        }
-                        r
-                    }
-                },
-                None => None,
-            };
-            let (mt, mb) = margins(b, i == 0, em);
-            let gap = if i == 0 { 0.0 } else { prev_mb.max(mt) };
-            y += gap;
-            let bh = match &*content {
-                Content::Text(TextKind::Para, tb) => tb.rt.height,
-                Content::Text(TextKind::Heading(l), tb) => {
-                    tb.rt.height + if *l <= 2 { em * 0.35 + 1.0 } else { 0.0 }
-                }
-                Content::Text(_, tb) => tb.rt.height + 2.0 * em * 0.6,
-                Content::Rule => em,
-                Content::Table(t) => t.rows.iter().sum::<f32>() + 1.0,
-                Content::Image { src, .. } => {
-                    let path = Self::image_path(base.as_deref(), src);
-                    match path
-                        .as_ref()
-                        .and_then(|p| st.images.get(p))
-                        .map(|e| &e.state)
-                    {
-                        Some(ImgState::Ready { orig, .. }) => {
-                            let (iw, ih) =
-                                (orig.0 as f32 * spec.px_scale, orig.1 as f32 * spec.px_scale);
-                            let k = (bw / iw).min(1.0);
-                            (ih * k).max(1.0)
-                        }
-                        _ => fonts.body.line_h * 1.6,
-                    }
-                }
-            };
-            laid.push(Laid {
-                content,
-                marker,
-                x,
-                w: bw,
-                y,
-                h: bh.ceil(),
-                gap,
-            });
-            y += bh.ceil();
-            prev_mb = mb;
+        if st.laid.len() != doc.blocks.len() {
+            return false;
         }
-        st.cache = cache;
-        st.laid = laid;
-        st.pad_x = pad_x;
-        st.total_h = y + prev_mb + em * 2.0;
-        st.layout_w = w;
-        let max = (st.total_h - h).max(0.0);
-        if st.reset_scroll {
-            st.reset_scroll = false;
-            st.scroll = 0.0;
-        } else if let Some(line) = anchor {
-            st.scroll = Self::y_for_line(&st, line);
+        let start = Instant::now();
+        let anchor = (st.scroll > 0.0).then(|| Self::line_for_y(st, st.scroll));
+        let mut changed = false;
+        for i in 0..st.laid.len() {
+            let (y, bh, bw, key, todo) = {
+                let l = &st.laid[i];
+                (l.y, l.h, l.w, l.key, l.content.is_none() && !l.failed)
+            };
+            if !todo {
+                continue;
+            }
+            match range {
+                Some((a, z)) if y + bh < a || y > z => continue,
+                Some(_) => {}
+                None if start.elapsed() >= budget => break,
+                None => {}
+            }
+            let built = build_content(&doc.blocks[i], bw, &fonts).map(Rc::new);
+            match built {
+                Some(c) => {
+                    let nh = st.measured_height(&c, &fonts, bw);
+                    st.cache.insert(key, c.clone());
+                    let l = &mut st.laid[i];
+                    l.content = Some(c);
+                    l.h = nh;
+                }
+                None => st.laid[i].failed = true,
+            }
+            changed = true;
         }
-        st.scroll = st.scroll.clamp(0.0, max);
-        self.rebuilt.set(rebuilt);
+        if changed {
+            st.place(fonts.em());
+            if let Some(line) = anchor {
+                st.scroll = Self::y_for_line(st, line);
+            }
+            st.scroll = st.scroll.clamp(0.0, (st.total_h - h).max(0.0));
+        }
+        st.pending()
+    }
+
+    /// 绘制前补齐可见范围内的块（排版后位置可能移动，最多重复几次）。
+    fn build_visible(&self) {
+        let (_, h) = client(self.hwnd.get());
+        for _ in 0..4 {
+            let (top, any) = {
+                let st = self.st.borrow();
+                let (a, z) = (st.scroll - h * 0.5, st.scroll + h * 1.5);
+                let any = st
+                    .laid
+                    .iter()
+                    .any(|l| l.content.is_none() && !l.failed && l.y + l.h >= a && l.y <= z);
+                (st.scroll, any)
+            };
+            if !any {
+                return;
+            }
+            self.build_pending(Some((top - h * 0.5, top + h * 1.5)), Duration::MAX);
+        }
+    }
+
+    /// 空闲定时器：继续排版一批；全部完成后按编辑器重新对齐。
+    fn on_layout_timer(&self) {
+        let more = self.build_pending(None, IDLE_CHUNK);
+        self.update_scrollbar();
+        if !more {
+            unsafe { KillTimer(self.hwnd.get(), TIMER_LAYOUT) };
+            self.refresh();
+            if let Some(app) = crate::app::app() {
+                app.md_doc_ready();
+            }
+        }
     }
 
     /// 重绘并更新滚动条。
@@ -1309,6 +1473,10 @@ impl MdView {
                 unsafe { KillTimer(self.hwnd.get(), TIMER_AUTOSCROLL) };
                 Some(0)
             }
+            WM_TIMER if wp == TIMER_LAYOUT => {
+                self.on_layout_timer();
+                Some(0)
+            }
             WM_TIMER if wp == TIMER_AUTOSCROLL => {
                 let mut pt = POINT { x: 0, y: 0 };
                 unsafe {
@@ -1438,8 +1606,8 @@ impl MdView {
         let l = &st.laid[i];
         // 在块下方的空隙里：算作块尾
         if dy > l.y + l.h {
-            let off = match &*l.content {
-                Content::Text(_, tb) => tb.wide.len() as u32,
+            let off = match l.content.as_deref() {
+                Some(Content::Text(_, tb)) => tb.wide.len() as u32,
                 _ => 1,
             };
             return Some(Pos { block: i, off });
@@ -1447,8 +1615,8 @@ impl MdView {
         if n == 0 {
             return Some(Pos { block: 0, off: 0 });
         }
-        Some(match &*l.content {
-            Content::Text(kind, tb) => {
+        Some(match l.content.as_deref() {
+            Some(Content::Text(kind, tb)) => {
                 let (ox, oy) = Self::text_origin(l, *kind, em);
                 let (p, _) = tb.rt.hit(x - ox, dy - oy);
                 Pos {
@@ -1473,7 +1641,7 @@ impl MdView {
         if dy > l.y + l.h || x < l.x || x > l.x + l.w {
             return None;
         }
-        let idx = match &*l.content {
+        let idx = match l.content.as_deref()? {
             Content::Text(kind, tb) => {
                 let (ox, oy) = Self::text_origin(l, *kind, em);
                 tb.link_at(tb.rt.char_at(x - ox, dy - oy)?)?
@@ -1525,8 +1693,8 @@ impl MdView {
     // ---- 选择与复制 ----
 
     fn block_len(l: &Laid) -> u32 {
-        match &*l.content {
-            Content::Text(_, tb) => tb.wide.len() as u32,
+        match l.content.as_deref() {
+            Some(Content::Text(_, tb)) => tb.wide.len() as u32,
             _ => 1,
         }
     }
@@ -1583,8 +1751,8 @@ impl MdView {
             if s >= e && !(s == 0 && e == 0 && len == 0) {
                 continue;
             }
-            let text = match &*l.content {
-                Content::Text(_, tb) if !(s == 0 && e == len) => {
+            let text = match l.content.as_deref() {
+                Some(Content::Text(_, tb)) if !(s == 0 && e == len) => {
                     String::from_utf16_lossy(&tb.wide[s as usize..e as usize])
                 }
                 _ => block.plain_text(),
@@ -1679,6 +1847,7 @@ impl MdView {
         let hwnd = self.hwnd.get();
         let (w, h) = client(hwnd);
         self.ensure_layout();
+        self.build_visible();
         if self.surface.borrow().is_none() {
             let s = Surface::new(hwnd, w as u32, h as u32).ok()?;
             *self.surface.borrow_mut() = Some(s);
@@ -1749,7 +1918,10 @@ impl MdView {
                 (e0 > s0).then_some((s0, e0))
             });
             let text_color = if b.quote > 0 { p.fg3 } else { p.fg1 };
-            match &*l.content {
+            let Some(content) = l.content.as_deref() else {
+                continue;
+            };
+            match content {
                 Content::Text(kind, tb) => {
                     let (ox, oy) = Self::text_origin(l, *kind, em);
                     let oy = oy - top;
@@ -1812,7 +1984,7 @@ impl MdView {
                 }
             }
             if let Some(m) = &l.marker {
-                let my = match &*l.content {
+                let my = match content {
                     Content::Text(kind, _) => Self::text_origin(l, *kind, em).1 - top,
                     _ => y,
                 };
@@ -1907,16 +2079,23 @@ impl MdView {
 
     // ---- 自测接口 ----
 
-    /// (块数, 排版块数, 内容总高, 最近一次重建块数)
+    /// (块数, 已排版块数, 内容总高, 最近一次同步排版新建的块数)
     pub fn st_stats(&self) -> (usize, usize, f32, usize) {
         self.ensure_layout();
         let st = self.st.borrow();
         (
             st.doc.blocks.len(),
-            st.laid.len(),
+            st.laid.iter().filter(|l| l.content.is_some()).count(),
             st.total_h,
             self.rebuilt.get(),
         )
+    }
+
+    /// 自测：不等空闲定时器，立即排完所有块。
+    pub fn st_finish_layout(&self) {
+        self.ensure_layout();
+        while self.build_pending(None, Duration::from_secs(60)) {}
+        unsafe { KillTimer(self.hwnd.get(), TIMER_LAYOUT) };
     }
 
     pub fn st_scroll(&self) -> f32 {
@@ -1938,7 +2117,7 @@ impl MdView {
         let st = self.st.borrow();
         let em = st.fonts.as_ref()?.em();
         let l = st.laid.get(i)?;
-        let Content::Text(kind, tb) = &*l.content else {
+        let Some(Content::Text(kind, tb)) = l.content.as_deref() else {
             return None;
         };
         let (a, z, _) = *tb.links.first()?;
