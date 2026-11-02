@@ -163,26 +163,65 @@
 
 ## 加密
 
-- [ ] 忘记密码无法恢复 → 首次加密时明确警告，要求输入两次。
-- [ ] nonce 绝不能重复 → 每次保存随机生成 12 字节。
-- [ ] KDF 参数写入文件头，不要硬编码在读取代码中。
-- [ ] 密钥用 `zeroize` 包裹，关闭文档时清除。
-- [ ] 完整内存 dump 会包含明文 → 崩溃转储用 `MiniDumpNormal`。
+- [x] 忘记密码无法恢复 → 首次加密时说明局限（只提示一次），新密码输入两次，少于 8 个字符时确认。
+- [x] nonce 绝不能重复 → 每次保存随机生成 12 字节。
+- [x] KDF 参数写入文件头，不要硬编码在读取代码中。
+- [x] 密钥用 `zeroize` 包裹，关闭文档时清除。
+- [x] 完整内存 dump 会包含明文 → 崩溃转储用 `MiniDumpNormal`。
 - [ ] 目录搜索、Ctrl+P 预览等功能不得读取加密文件明文。
 - [ ] 加密文件的会话清单中不要记录敏感预览（如首行作为标题）。
+- [x] 修改密码要先确认旧密码（同一 salt 重新派生后常数时间比较），换新的随机 salt；保存失败时把密钥换回去。
+- [x] Argon2（64 MiB、3 轮）约 0.2–0.5 秒，在 UI 线程计算 → 显示等待光标。
+- [x] "另存为不加密的文件"若选中原加密文件的路径，会用明文覆盖它 → 单独确认。
 
 ## Markdown 预览
 
-- [ ] 每次按键都重新解析和排版会卡 → 防抖 150 ms，后台解析。
-- [ ] 大图片解码阻塞 UI → WIC 解码放后台，缓存缩放后的位图。
-- [ ] 相对图片路径以 Markdown 文件所在目录为基准。
-- [ ] 链接点击用 `ShellExecuteW` 打开，只允许 `http(s)`、`mailto`、本地文件，不执行 `file:` 中的可执行文件。
+- [x] 每次按键都重新解析和排版会卡 → 防抖 150 ms，后台线程解析，只处理最新一份文本；排版按块缓存，只有改动的块重新排版。
+- [x] 大图片解码阻塞 UI → WIC 在后台线程解码，缩到不超过 2560 像素宽，原图超过 6400 万像素或文件超过 200 MB 拒绝；位图按渲染目标缓存，渲染目标重建后从像素重新创建。
+- [x] 相对图片路径以 Markdown 文件所在目录为基准；未保存的文档只能显示绝对路径的图片。
+- [x] 链接点击：只有 http(s)、mailto 用 `ShellExecuteW` 打开；本地文件在编辑器中打开（文件夹在资源管理器中显示），从不执行；`javascript:`、`ms-settings:` 等协议一律拒绝。
+- [x] 紧凑列表项（项之间没有空行）里的文字没有 `Paragraph` 标签，直接出现在 `Item` 中 → 遇到行内事件且没有打开的段落时开一个"隐式段落"。
+- [x] 表格中缺少的单元格由 pulldown-cmark 补成空单元格，不需要自己补齐。
+- [x] 中文之间的软换行变成空格会出现多余的空隙 → 两侧都是中日韩字符时不加空格。
+- [x] 块的源码行号取自 `into_offset_iter` 的范围；范围通常包含结尾的换行符，末行要按 `end - 1` 计算。
+- [x] 排版缓存的键不能包含行号：在上方插入一行会让下面所有块的行号变化 → `Block::content_hash` 不含行号。
+- [x] 列表标记（•、1.）逐块重新排版会抵消增量排版（长列表每次编辑都重建几千个标记）→ 按标记文字缓存，字体变化时清空。
+- [x] DirectWrite 的文字颜色要用画刷作为绘制效果（`SetDrawingEffect`），而画刷属于渲染目标 → 记下已为哪个渲染目标设置过；渲染目标重建后重新设置。
+- [x] `HitTestTextRange` 要先用空缓冲区取得数量（此时返回 `E_NOT_SUFFICIENT_BUFFER` 但会写出数量），再分配缓冲区调用一次。
+- [x] 双向滚动同步会互相拉扯 → 程序设置预览位置时不回调；用户滚动预览后 200 ms 内忽略编辑器发来的滚动通知。
+- [x] 重新载入（"重新打开为"某编码）换了文档指针，不会发 `SCN_MODIFIED` → 预览记下文档指针，变化时重新解析。
+- [x] WIC 工厂需要 COM → 图片线程自己 `CoInitializeEx(MTA)`（已初始化返回 S_FALSE，照常使用）。
+- [x] 预览收到编辑器通知时可能正处于自身的借用中 → 被通知路径调用的查询（`doc_id`）用 `try_borrow`。
+
+## 宏
+
+- [x] Scintilla 把一次回车录成逐个换行字符的 `SCI_REPLACESEL`（CRLF 下 `"\r"`、`"\n"` 两条），而且是在 `SCN_CHARADDED` 之后才录；回放 `REPLACESEL` 不触发 `SCN_CHARADDED`，自动缩进与列表续写不会发生 → 合并为一个 `NewLine` 步骤，回放时发 `SCI_NEWLINE`。
+- [x] 程序在通知处理中发给 Scintilla 的消息（列表续写插入的前缀）也会被录，并且排在换行字符之前 → 静音计数：执行菜单命令、列表续写、查找操作期间不录 `SCN_MACRORECORD`。
+- [x] 菜单命令（如转大写）与它内部发出的 Scintilla 消息会重复录 → 先记命令，再静音执行；"替换"内部调用"查找下一个"同理。
+- [x] `SCN_MACRORECORD` 的字符串参数是指针，只在通知期间有效 → 立即复制（`SCI_ADDTEXT`/`SCI_APPENDTEXT` 的 wParam 是长度，其余以 NUL 结尾）。
+- [x] 录制是视图级别的（`SCI_STARTRECORD` 只作用于一个 Scintilla 窗口）→ 两个编辑视图同时开始、停止。
+- [x] "运行到文件末尾"可能永远不结束（例如查找会绕回开头）→ 一轮下来光标与文档长度都没变就停，另有次数（100 万）与时间（60 秒）上限。
+- [x] 宏文件可能被改过 → 回放只执行白名单内的菜单命令。
+- [x] 宏里可能有加密文档的明文 → 录制期间碰过加密文档的宏不写盘（并删除旧的宏文件）。
+
+## 打印
+
+- [x] `SCI_FORMATRANGEFULL` 用 GDI 绘制（`Technology::Default`），与屏幕的 DirectWrite 不同：彩色 emoji 打印为黑白或方框。
+- [x] 样式字号包含屏幕缩放比例 → 打印前按 100% 应用样式，打印后恢复，期间关闭重绘。
+- [x] Gruvbox 背景色打印出来很费墨 → `SC_PRINT_COLOURONWHITE`（白底，保留语法颜色）。
+- [x] 打印机设备坐标的原点是可打印区域左上角 → 页边距要减去 `PHYSICALOFFSETX/Y`；屏幕或内存 DC 的 `PHYSICALWIDTH` 为 0，退回用 `HORZRES/VERTRES`（自测用内存 DC 分页）。
+- [x] 版面放不下任何字符时 `FORMATRANGE` 返回原位置 → 每页检查"有没有前进"，否则死循环。
+- [x] 选择"另存为 PDF"后在文件名对话框中取消，`StartDocW` 失败且错误码为 `ERROR_CANCELLED` → 不弹错误。
+- [x] `StartDocW`、`StartPage`、`DOCINFOW` 在 windows-sys 的 `Win32_Storage_Xps` 特性中；`PrintDlgExW` 需要 `Win32_Graphics_Gdi`。
+- [x] PrintDlgEx 返回的 DEVMODE / DEVNAMES 保留下来传给下一次，用户选的打印机与纸张不会丢失。
 
 ## windows-sys
 
 - [ ] `SHELLEXECUTEINFOW` 需要 `Win32_System_Registry` 特性（字段含 HKEY）；`CreateFileW` 需要 `Win32_Security`。
 - [ ] `SetUnhandledExceptionFilter` 与 `MiniDumpWriteDump` 的类型牵涉大量特性，直接自己声明（kernel32 链接 + dbghelp 动态加载）更省事。
 
+- [x] windows 0.58：`ID2D1RenderTarget::DrawBitmap` 的目标矩形参数类型是 `Option<*const D2D_RECT_F>`，`Some(&rect)` 不能自动转换，要写 `Some(&rect as *const _)`。
+- [x] windows 0.58：WIC 需要 `Win32_Graphics_Imaging` 与 `Win32_System_Com`（`CoCreateInstance`）；`GENERIC_ACCESS_RIGHTS` 在 `Win32::Foundation`。
 - [x] windows 0.58：`ID2D1RenderTarget::CreateSolidColorBrush` 需要 `Foundation_Numerics` 特性（画刷属性含 Matrix3x2），其他常用绘制方法只要 `Win32_Graphics_Direct2D_Common`。
 - [x] windows 0.58 的 `HWND` 是 `HWND(*mut c_void)`，windows-sys 0.59 是 `*mut c_void`，跨 crate 传递时用 `HWND(raw)` 包装。
 - [x] `Option<&dyn Fn(&[u8]) -> String>` 会触发 clippy `type_complexity` → 用类型别名（`hn_large::decode::LegacyDecode`）。

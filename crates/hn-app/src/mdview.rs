@@ -26,7 +26,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::Controls::SetScrollInfo;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GetClientRect,
@@ -817,6 +817,10 @@ impl MdView {
             }
             self.ensure_layout();
             self.refresh();
+            // 位置变了：按编辑器重新对齐
+            if let Some(app) = crate::app::app() {
+                app.md_doc_ready();
+            }
         }
     }
 
@@ -890,6 +894,12 @@ impl MdView {
             return;
         }
         let Some(spec) = st.spec.clone() else { return };
+        // 只是宽度变了（文档没换）：重新折行后保持顶部的源码行不变
+        let anchor = (st.layout_w > 0.0
+            && !st.reset_scroll
+            && st.scroll > 0.0
+            && st.laid.len() == st.doc.blocks.len())
+        .then(|| Self::line_for_y(&st, st.scroll));
         if st.fonts.is_none() {
             st.fonts = Fonts::new(&spec).map(Rc::new);
         }
@@ -987,6 +997,8 @@ impl MdView {
         if st.reset_scroll {
             st.reset_scroll = false;
             st.scroll = 0.0;
+        } else if let Some(line) = anchor {
+            st.scroll = Self::y_for_line(&st, line);
         }
         st.scroll = st.scroll.clamp(0.0, max);
         self.rebuilt.set(rebuilt);
@@ -1971,9 +1983,5 @@ impl MdView {
 
     pub fn st_paint(&self) -> bool {
         self.render().is_some()
-    }
-
-    pub fn st_has_focus(&self) -> bool {
-        unsafe { GetFocus() == self.hwnd.get() }
     }
 }

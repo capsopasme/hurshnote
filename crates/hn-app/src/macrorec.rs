@@ -390,15 +390,6 @@ impl App {
     pub(crate) fn st_toggle_record(&self) {
         self.toggle_record();
     }
-
-    /// 自测：模拟一次 SCN_CHARADDED 的换行处理（与真实按键走同一条路径）。
-    pub(crate) fn st_newline_hook(&self) {
-        if let Some(sci) = self.sci() {
-            let _m = self.mute_macro();
-            let enabled = self.settings.borrow().list_continue;
-            editops::on_newline(&sci, enabled);
-        }
-    }
 }
 
 thread_local! {
