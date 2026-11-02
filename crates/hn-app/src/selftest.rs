@@ -404,6 +404,12 @@ pub fn run(app: &App, startup_ms: f64) -> String {
     // 15. 开发者工具：目录搜索/替换、运行 Python、终端
     dev_checks(app, &dir, &mut |n, p, d| check(n, p, d, &mut out));
 
+    // 16. 内容：Markdown 预览、宏、打印、加密界面
+    let metrics = m6_checks(app, &dir, &mut |n, p, d| check(n, p, d, &mut out));
+    for m in metrics {
+        writeln!(out, "{m}").unwrap();
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 
     sci.set_save_point();
@@ -968,4 +974,278 @@ pub fn bench_dir(dir: &std::path::Path, pattern: &str, out: &std::path::Path) ->
         Ok(()) => 0,
         Err(_) => 1,
     }
+}
+
+/// 2×2 的 24 位 BMP（预览图片解码用）。
+fn bmp_2x2() -> Vec<u8> {
+    let (off, data) = (54u32, 16u32);
+    let mut v = Vec::new();
+    v.extend_from_slice(b"BM");
+    v.extend_from_slice(&(off + data).to_le_bytes());
+    v.extend_from_slice(&[0u8; 4]);
+    v.extend_from_slice(&off.to_le_bytes());
+    v.extend_from_slice(&40u32.to_le_bytes());
+    v.extend_from_slice(&2i32.to_le_bytes());
+    v.extend_from_slice(&2i32.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&24u16.to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v.extend_from_slice(&data.to_le_bytes());
+    v.extend_from_slice(&2835i32.to_le_bytes());
+    v.extend_from_slice(&2835i32.to_le_bytes());
+    v.extend_from_slice(&[0u8; 8]);
+    for _ in 0..2 {
+        v.extend_from_slice(&[0, 0, 255, 0, 255, 0, 0, 0]);
+    }
+    v
+}
+
+/// M6：Markdown 预览、宏、打印、加密界面。返回性能数据（`key=value` 行）。
+fn m6_checks(
+    app: &App,
+    dir: &std::path::Path,
+    check: &mut dyn FnMut(&str, bool, &str),
+) -> Vec<String> {
+    let mut metrics = Vec::new();
+    let Some(sci) = app.st_sci() else {
+        check("m6_sci", false, "");
+        return metrics;
+    };
+    let Some(v) = crate::mdview::view() else {
+        check("md_view", false, "no preview window");
+        return metrics;
+    };
+
+    // ---- Markdown 预览 ----
+    let _ = std::fs::write(dir.join("img.bmp"), bmp_2x2());
+    let md_path = dir.join("doc.md");
+    let src = "# 标题\r\n\r\n段落 **粗体** 与 [链接](https://example.com/x)。\r\n\r\n- 一\r\n- 二\r\n  1. 嵌套\r\n\r\n| a | b |\r\n|---|--:|\r\n| 1 | 2 |\r\n\r\n```rust\r\nfn main() {}\r\n```\r\n\r\n![图](img.bmp)\r\n\r\n> 引用\r\n";
+    let _ = std::fs::write(&md_path, src);
+    app.st_open(&md_path);
+    check(
+        "md_visible",
+        app.st_md_visible() && v.is_shown() && app.st_active_lang() == "markdown",
+        &format!(
+            "visible={} lang={}",
+            app.st_md_visible(),
+            app.st_active_lang()
+        ),
+    );
+    let (blocks, laid, total, _) = v.st_stats();
+    check(
+        "md_blocks",
+        blocks == 9 && laid == 9 && total > 0.0,
+        &format!("blocks={blocks} laid={laid} total={total}"),
+    );
+    check("md_paint", v.st_paint(), "");
+    let link = v.st_link_point(1).and_then(|(x, y)| v.st_link_at(x, y));
+    check(
+        "md_link_hit",
+        link.as_deref() == Some("https://example.com/x"),
+        &format!("{link:?} at {:?}", v.st_link_point(1)),
+    );
+    let img_ok = wait_until(8000, || {
+        v.st_pump();
+        v.st_images().0 == 1
+    });
+    check("md_image", img_ok, &format!("{:?}", v.st_images()));
+    let all = v.st_select_all_text();
+    check(
+        "md_copy",
+        all.contains("标题")
+            && all.contains("a\tb")
+            && all.contains("fn main() {}")
+            && all.contains("• 一"),
+        &format!("{all:?}"),
+    );
+    let ys: Vec<f32> = (0..22).map(|l| v.st_y_for_line(l as f64)).collect();
+    let mono = ys.windows(2).all(|w| w[1] >= w[0]);
+    let back = v.st_line_for_y(v.st_y_for_line(10.0));
+    check(
+        "md_line_map",
+        mono && ys[21] > ys[0] && (back - 10.0).abs() < 1.0,
+        &format!("mono={mono} back={back:.2} ys={ys:?}"),
+    );
+    // 只改一个段落：其余块复用排版结果
+    let pos = sci.with_text(|t| {
+        std::str::from_utf8(t)
+            .ok()
+            .and_then(|s| s.find("段落"))
+            .unwrap_or(0)
+    });
+    sci.set_sel(pos, pos);
+    sci.send_str(SCI_REPLACESEL, 0, "新");
+    app.st_md_push();
+    let (b2, _, _, rebuilt) = v.st_stats();
+    check(
+        "md_incremental",
+        b2 == 9 && rebuilt <= 2,
+        &format!("blocks={b2} rebuilt={rebuilt}"),
+    );
+    app.st_set_language("text");
+    check(
+        "md_hidden_for_text",
+        !app.st_md_visible() && !v.is_shown(),
+        "",
+    );
+    app.st_set_language("markdown");
+    check("md_shown_again", app.st_md_visible() && v.is_shown(), "");
+    app.st_close_active();
+
+    // ---- 10 万字文档：首次排版、编辑后更新、滚动同步 ----
+    app.new_document();
+    let mut big = String::new();
+    let mut i = 0;
+    let mut chars = 0;
+    while chars < 100_000 {
+        let before = big.len();
+        big.push_str(&format!(
+            "## 第 {i} 节\r\n\r\n这是一段用于测试预览性能的**中文**文字，包含 `代码` 与 [链接](https://example.com/{i})。\r\n\r\n- 项目甲\r\n- 项目乙\r\n\r\n"
+        ));
+        chars += big[before..].chars().count();
+        i += 1;
+    }
+    set_text(&sci, &big);
+    app.st_set_language("markdown");
+    let t = std::time::Instant::now();
+    app.st_md_push();
+    let full_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let (bb, _, total_big, _) = v.st_stats();
+    let mid = sci.line_start(sci.line_count() / 2);
+    sci.set_sel(mid, mid);
+    sci.send_str(SCI_REPLACESEL, 0, "插入");
+    let t = std::time::Instant::now();
+    app.st_md_push();
+    let edit_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let (_, _, _, rebuilt_big) = v.st_stats();
+    metrics.push(format!("md_blocks_100k={bb}"));
+    metrics.push(format!("md_full_ms={full_ms:.1}"));
+    metrics.push(format!("md_edit_ms={edit_ms:.1}"));
+    check(
+        "md_large",
+        bb > 1000 && rebuilt_big <= 3,
+        &format!("blocks={bb} rebuilt={rebuilt_big} full={full_ms:.0}ms edit={edit_ms:.0}ms"),
+    );
+    sci.send(SCI_SETFIRSTVISIBLELINE, sci.line_count() / 2, 0);
+    app.st_md_editor_scrolled();
+    let s1 = v.st_scroll();
+    check(
+        "md_sync_editor_to_preview",
+        s1 > total_big * 0.3 && s1 < total_big * 0.7,
+        &format!("scroll={s1} total={total_big}"),
+    );
+    v.st_set_scroll(0.0);
+    let first = sci.send(SCI_GETFIRSTVISIBLELINE, 0, 0);
+    check(
+        "md_sync_preview_to_editor",
+        first < 3,
+        &format!("first={first}"),
+    );
+    app.st_close_active();
+
+    // ---- 宏：录制（含回车触发的列表续写与菜单命令）→ 回放 → 撤销 ----
+    app.new_document();
+    set_text(&sci, "");
+    app.st_toggle_record();
+    sci.send_str(SCI_REPLACESEL, 0, "- a");
+    sci.send(SCI_NEWLINE, 0, 0);
+    sci.send_str(SCI_REPLACESEL, 0, "b");
+    app.st_command(IDM_EDIT_SELECT_ALL);
+    app.st_command(IDM_EDIT_UPPER);
+    sci.send(SCI_DOCUMENTEND, 0, 0);
+    app.st_toggle_record();
+    let recorded = text(&sci);
+    let steps = app.st_macro_steps();
+    check(
+        "macro_record",
+        recorded == "- A\r\n- B" && steps == 6,
+        &format!("{recorded:?} steps={steps}"),
+    );
+    set_text(&sci, "");
+    app.st_play_macro(1, false);
+    let played = text(&sci);
+    check("macro_play", played == "- A\r\n- B", &format!("{played:?}"));
+    sci.send(SCI_UNDO, 0, 0);
+    check(
+        "macro_single_undo",
+        text(&sci).is_empty(),
+        &format!("{:?}", text(&sci)),
+    );
+    // 运行到文件末尾
+    set_text(&sci, "x\r\nx\r\nx\r\n");
+    app.st_toggle_record();
+    sci.send_str(SCI_REPLACESEL, 0, "* ");
+    sci.send(SCI_LINEDOWN, 0, 0);
+    sci.send(SCI_HOME, 0, 0);
+    app.st_toggle_record();
+    set_text(&sci, "x\r\nx\r\nx\r\n");
+    sci.send(SCI_GOTOPOS, 0, 0);
+    app.st_play_macro(1, true);
+    let to_end = text(&sci);
+    check(
+        "macro_until_end",
+        to_end == "* x\r\n* x\r\n* x\r\n",
+        &format!("{to_end:?}"),
+    );
+    app.st_close_active();
+
+    // ---- 打印：分页（内存 DC），打印后恢复缩放样式 ----
+    app.new_document();
+    let lines: String = (0..400)
+        .map(|i| format!("第 {i} 行 print test line\r\n"))
+        .collect();
+    set_text(&sci, &lines);
+    app.st_command(IDM_VIEW_ZOOM_IN);
+    let size_before = sci.send(SCI_STYLEGETSIZEFRACTIONAL, STYLE_DEFAULT as usize, 0);
+    let pages = app.st_print_pages();
+    let size_after = sci.send(SCI_STYLEGETSIZEFRACTIONAL, STYLE_DEFAULT as usize, 0);
+    app.st_command(IDM_VIEW_ZOOM_RESET);
+    check(
+        "print_paginate",
+        matches!(pages, Ok(n) if n >= 2) && size_before == size_after,
+        &format!("{pages:?} size {size_before} -> {size_after}"),
+    );
+    app.st_close_active();
+
+    // ---- 加密：修改密码 ----
+    let pw_path = dir.join("pw.hne");
+    let pw_res = (|| -> Result<(), String> {
+        let e = |x: &dyn std::fmt::Display| x.to_string();
+        let fast = hn_crypto::KdfParams {
+            m_cost_kib: 1024,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let key = hn_crypto::Key::generate("旧密码", fast).map_err(|x| e(&x))?;
+        let payload = hn_core::payload::Payload::new("改密测试".as_bytes().to_vec());
+        let file = hn_crypto::seal(&key, &payload.encode()).map_err(|x| e(&x))?;
+        std::fs::write(&pw_path, &file).map_err(|x| e(&x))?;
+        let stamp = hn_core::stamp::DiskStamp::new(0, &file);
+        if !app.st_install_encrypted(&pw_path, key, payload, stamp) {
+            return Err("install".into());
+        }
+        if app.st_change_password("错误", "新密码").is_ok() {
+            return Err("wrong old password accepted".into());
+        }
+        app.st_change_password("旧密码", "新密码")?;
+        let written = std::fs::read(&pw_path).map_err(|x| e(&x))?;
+        if hn_crypto::open_with_password("旧密码", &written).is_ok() {
+            return Err("old password still opens".into());
+        }
+        let (_, pt) = hn_crypto::open_with_password("新密码", &written).map_err(|x| e(&x))?;
+        let p = hn_core::payload::Payload::decode(&pt).map_err(|x| e(&x))?;
+        if p.text != "改密测试".as_bytes() {
+            return Err("content changed".into());
+        }
+        Ok(())
+    })();
+    check(
+        "encrypt_change_password",
+        pw_res.is_ok(),
+        &format!("{pw_res:?}"),
+    );
+    if app.st_active_encrypted() {
+        app.st_close_active();
+    }
+    metrics
 }

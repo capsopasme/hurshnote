@@ -1,0 +1,13 @@
+[package]
+name = "hn-md"
+description = "HurshNote Markdown 预览：解析为与平台无关的扁平块列表（跨平台，布局与绘制在 hn-app）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pulldown-cmark.workspace = true
+
+[lints]
+workspace = true

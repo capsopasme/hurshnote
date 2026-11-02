@@ -62,8 +62,14 @@ mod drawer;
 mod files;
 #[path = "large.rs"]
 mod large;
+#[path = "macrorec.rs"]
+mod macrorec;
+#[path = "mdpreview.rs"]
+mod mdpreview;
 #[path = "persist.rs"]
 mod persist;
+#[path = "printing.rs"]
+mod printing;
 #[path = "quick.rs"]
 mod quick;
 #[path = "runpy.rs"]
@@ -78,6 +84,8 @@ use crate::watcher::{Event as FsEvent, Watcher};
 use dirsearch::{DirJob, DirMsg, WM_APP_DIRSEARCH};
 use hn_core::snapshot::Store;
 use large::{LargeMsg, LARGE_THRESHOLD, TIMER_LARGE, WM_APP_LARGE};
+use macrorec::MacroState;
+use mdpreview::TIMER_MD;
 use persist::{SnapJob, TIMER_SESSION, TIMER_SESSIONTEST, TIMER_SNAPSHOT};
 use runpy::{RunState, WM_APP_RUN};
 use sidebar::Drag;
@@ -218,6 +226,21 @@ pub struct App {
     dir_tx: Sender<DirMsg>,
     dir_rx: Receiver<DirMsg>,
     dir_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // ---- Markdown 预览 ----
+    md_visible: Cell<bool>,
+    /// 预览当前显示的文档指针（重新载入后指针会变）
+    md_ptr: Cell<isize>,
+    /// 此时刻（GetTickCount64）之前不让编辑器滚动带动预览
+    md_guard: Cell<u64>,
+    /// 预览分隔条拖动时的可用范围（编辑区左右边界）
+    md_span: Cell<(i32, i32)>,
+    // ---- 宏 ----
+    macro_state: RefCell<MacroState>,
+    /// 大于 0 时不录制 Scintilla 的宏通知（程序自己发出的消息）
+    macro_mute: Cell<u32>,
+    // ---- 打印 ----
+    /// 上次打印的 DEVMODE / DEVNAMES（HGLOBAL）
+    print_dev: Cell<(isize, isize)>,
 }
 
 thread_local! {
@@ -395,6 +418,13 @@ pub fn run() -> i32 {
             dir_tx,
             dir_rx,
             dir_pending: Default::default(),
+            md_visible: Cell::new(false),
+            md_ptr: Cell::new(0),
+            md_guard: Cell::new(0),
+            md_span: Cell::new((0, 0)),
+            macro_state: RefCell::new(MacroState::default()),
+            macro_mute: Cell::new(0),
+            print_dev: Cell::new((0, 0)),
         });
         APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -709,6 +739,7 @@ impl App {
                     TIMER_SNAPSHOT | TIMER_SESSION => self.on_persist_timer(wp),
                     TIMER_SESSIONTEST => self.session_test_ready(),
                     TIMER_LARGE => self.on_large_timer(),
+                    TIMER_MD => self.md_on_timer(),
                     _ => {}
                 }
                 Some(0)
@@ -849,6 +880,7 @@ impl App {
         for i in 0..2 {
             crate::lview::create(hwnd, self.hinstance, i);
         }
+        crate::mdview::create(hwnd, self.hinstance);
 
         // 接管视图自带的初始文档
         let ptr = sci.doc_pointer();
@@ -890,7 +922,8 @@ impl App {
         let left = self.layout_sidebar(h, &mut splitters);
         let width = (rc.right - left).max(0);
         let eh = self.layout_drawer(left, width, h, &mut splitters);
-        self.layout_editors(left, width, eh, &mut splitters);
+        let ew = self.layout_preview(left, width, eh, &mut splitters);
+        self.layout_editors(left, ew, eh, &mut splitters);
         *self.splitters.borrow_mut() = splitters;
     }
 
@@ -1020,6 +1053,7 @@ impl App {
         }
         // 大文件视图的字体随缩放、DPI、行号设置变化
         self.sync_overlays();
+        self.md_apply_style();
     }
 
     /// 按视图中的文档与设置应用视图属性。
@@ -1638,6 +1672,13 @@ impl App {
     // ---- 命令 ----
 
     fn command(&self, id: u16) {
+        // 宏：录制中先记下命令；命令执行期间程序发给 Scintilla 的消息不录
+        self.record_command(id);
+        let _mute = self.mute_macro();
+        self.command_inner(id);
+    }
+
+    fn command_inner(&self, id: u16) {
         let Some(sci) = self.sci() else { return };
         // 焦点视图显示大文件视图时，编辑类命令由它处理或拦截
         if self.large_command(id) {
@@ -1670,6 +1711,17 @@ impl App {
             IDM_FILE_SAVE_ENCRYPTED => {
                 self.save_encrypted_as();
             }
+            IDM_FILE_CHANGE_PASSWORD => {
+                self.change_password();
+            }
+            IDM_FILE_SAVE_DECRYPTED => {
+                self.save_decrypted_as();
+            }
+            IDM_FILE_PRINT => self.print_active(),
+            IDM_VIEW_MD_PREVIEW => self.toggle_preview(),
+            IDM_MACRO_RECORD => self.toggle_record(),
+            IDM_MACRO_PLAY => self.play_macro(1, false),
+            IDM_MACRO_PLAY_MULTI => self.play_macro_dialog(),
             IDM_SET_SNAPSHOTS => {
                 self.toggle_setting(|s| s.snapshots = !s.snapshots);
                 if self.snapshots_enabled() {
@@ -1969,6 +2021,19 @@ impl App {
 
     fn on_editor_notify(&self, view: usize, sci: &Sci, n: &Notification) {
         let focused = view == self.focus.get();
+        match n.code {
+            SCN_MACRORECORD => {
+                self.on_macro_record(n);
+                return;
+            }
+            SCN_MODIFIED => {
+                if n.modification_type as isize & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT) != 0 {
+                    self.md_on_modified(self.view_doc[view].get());
+                }
+                return;
+            }
+            _ => {}
+        }
         if n.code == SCN_FOCUSIN && !focused {
             // 用户点进了另一视图
             if self.docs.try_borrow_mut().is_ok() {
@@ -2027,6 +2092,9 @@ impl App {
                     theme::update_line_number_width(sci, show);
                     self.mark_changed();
                 }
+                if n.updated & SC_UPDATE_V_SCROLL as i32 != 0 {
+                    self.md_editor_scrolled();
+                }
                 self.update_status();
             }
             SCN_CHARADDED => {
@@ -2034,6 +2102,8 @@ impl App {
                     let lang = self.active_doc(|d| d.lang).unwrap_or(0);
                     let list_lang = matches!(LANGS[lang].id, "text" | "markdown");
                     let enabled = self.settings.borrow().list_continue && list_lang;
+                    // 列表续写插入的文字不录进宏（回放时由 SCI_NEWLINE 再次触发）
+                    let _mute = self.mute_macro();
                     editops::on_newline(sci, enabled);
                 }
             }
@@ -2105,6 +2175,9 @@ impl App {
             .unwrap_or((false, false));
         check(IDM_VIEW_HEX, hex);
         check(IDM_VIEW_TAIL, tail);
+        check(IDM_VIEW_MD_PREVIEW, s.md_preview);
+        check(IDM_MACRO_RECORD, self.is_recording());
+        let encrypted = self.active_doc(|d| d.is_encrypted()).unwrap_or(false);
         let page = self
             .drawer_shown
             .get()
@@ -2119,6 +2192,9 @@ impl App {
                 IDM_RUN_STOP as u32,
                 if running { 0 } else { MF_GRAYED },
             );
+            for id in [IDM_FILE_CHANGE_PASSWORD, IDM_FILE_SAVE_DECRYPTED] {
+                EnableMenuItem(menu, id as u32, if encrypted { 0 } else { MF_GRAYED });
+            }
             let term = matches!(page, Some(drawer::Page::Term(_)));
             EnableMenuItem(
                 menu,
@@ -2353,6 +2429,8 @@ impl App {
     /// 执行查找对话框或快捷键触发的动作。
     pub fn find_action(&self, action: FindAction, st: FindState) {
         let Some(sci) = self.sci() else { return };
+        // 宏：录下查找对话框的操作；执行期间（含替换后的"查找下一个"）不再重复录
+        let _rec = self.record_find(action, &st);
         *self.find.borrow_mut() = st.clone();
         if self.active_overlay().is_some() {
             self.large_find(action, st);
@@ -2518,6 +2596,7 @@ impl App {
 
     pub fn refresh(&self) {
         self.sync_overlays();
+        self.sync_preview();
         self.update_title();
         self.update_status();
         self.refresh_open_list();
@@ -2622,11 +2701,18 @@ impl App {
         if lossy {
             flags.push("解码有损");
         }
-        let part0 = if msg.is_empty() {
+        let mut part0 = if msg.is_empty() {
             flags.join(" · ")
         } else {
             msg
         };
+        if self.is_recording() {
+            part0 = if part0.is_empty() {
+                "● 正在录制宏".to_string()
+            } else {
+                format!("● 正在录制宏 · {part0}")
+            };
+        }
 
         let dirty = sci.is_modified() || meta_dirty;
         let state = match (dirty, sci.is_read_only()) {

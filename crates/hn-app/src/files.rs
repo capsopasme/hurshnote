@@ -7,6 +7,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use super::*;
 use crate::fsio::{self, SaveError};
+
+/// 显示等待光标（下次移动鼠标时恢复）。
+unsafe fn set_wait_cursor() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::SetCursor;
+    unsafe { SetCursor(LoadCursorW(null_mut(), 32514usize as _)) };
+}
 use crate::pwdlg;
 use crate::watcher::Event as FsEvent;
 
@@ -257,23 +263,68 @@ impl App {
         true
     }
 
-    /// 另存为加密文件。
-    pub(super) fn save_encrypted_as(&self) -> bool {
-        let Some(pw) = pwdlg::ask(
-            self.hwnd(),
-            self.hinstance,
-            "另存为加密文件",
-            "设置密码。打开这个文件时需要输入它：",
-            true,
-        ) else {
+    /// 首次加密前说明局限（只提示一次）。返回是否继续。
+    fn confirm_first_encryption(&self) -> bool {
+        if self.settings.borrow().crypto_warned || self.selftest_out.is_some() {
+            return true;
+        }
+        let text = "关于加密文件：\n\n\
+            • 用 Argon2id 从密码派生密钥、AES-256-GCM 加密；换一台电脑用同一密码即可打开。\n\
+            • 忘记密码就无法恢复内容，HurshNote 没有任何后门或找回办法。\n\
+            • 编辑期间明文在内存和剪贴板中，无法防御本机上的恶意软件。\n\
+            • 未保存修改的快照用同一密钥加密后保存。\n\n\
+            继续吗？";
+        if !dialogs::ask_ok_cancel(self.hwnd(), text) {
             return false;
-        };
-        let key = match Key::generate(&pw, KdfParams::default()) {
-            Ok(k) => k,
+        }
+        self.toggle_setting(|s| s.crypto_warned = true);
+        true
+    }
+
+    /// 密码过短时确认。返回是否继续使用它。
+    fn accept_password(&self, pw: &str) -> bool {
+        if pw.chars().count() >= 8 || self.selftest_out.is_some() {
+            return true;
+        }
+        dialogs::ask_ok_cancel(
+            self.hwnd(),
+            "密码少于 8 个字符，容易被暴力破解。\n\n仍然使用这个密码吗？",
+        )
+    }
+
+    /// 派生密钥（约 0.2–0.5 秒，期间显示等待光标）。
+    fn derive_new_key(&self, pw: &str) -> Option<Key> {
+        unsafe { set_wait_cursor() };
+        match Key::generate(pw, KdfParams::default()) {
+            Ok(k) => Some(k),
             Err(e) => {
                 dialogs::error_box(self.hwnd(), &format!("{e}"));
-                return false;
+                None
             }
+        }
+    }
+
+    /// 另存为加密文件。
+    pub(super) fn save_encrypted_as(&self) -> bool {
+        if !self.confirm_first_encryption() {
+            return false;
+        }
+        let pw = loop {
+            let Some(pw) = pwdlg::ask(
+                self.hwnd(),
+                self.hinstance,
+                "另存为加密文件",
+                "设置密码。打开这个文件时需要输入它：",
+                true,
+            ) else {
+                return false;
+            };
+            if self.accept_password(&pw) {
+                break pw;
+            }
+        };
+        let Some(key) = self.derive_new_key(&pw) else {
+            return false;
         };
         let current = self.active_doc(|d| d.path.clone()).flatten();
         let suggested = current
@@ -294,6 +345,151 @@ impl App {
         self.show_message("已加密保存。请牢记密码，忘记后无法恢复。");
         self.refresh();
         true
+    }
+
+    /// 文件 → 修改密码：确认当前密码后换新密码（新的随机 salt）并立即保存。
+    pub(super) fn change_password(&self) -> bool {
+        let Some((old_key, path)) = self
+            .active_doc(|d| d.key.clone().zip(d.path.clone()))
+            .flatten()
+        else {
+            self.show_message("当前文档没有加密。可以用“另存为加密文件”加密它");
+            return false;
+        };
+        loop {
+            let Some(pw) = pwdlg::ask(
+                self.hwnd(),
+                self.hinstance,
+                "修改密码",
+                "输入当前密码：",
+                false,
+            ) else {
+                return false;
+            };
+            unsafe { set_wait_cursor() };
+            match old_key.verify(&pw) {
+                Ok(true) => break,
+                Ok(false) => dialogs::error_box(self.hwnd(), "当前密码不正确。"),
+                Err(e) => {
+                    dialogs::error_box(self.hwnd(), &format!("{e}"));
+                    return false;
+                }
+            }
+        }
+        let pw = loop {
+            let Some(pw) = pwdlg::ask(
+                self.hwnd(),
+                self.hinstance,
+                "修改密码",
+                "设置新密码：",
+                true,
+            ) else {
+                return false;
+            };
+            if self.accept_password(&pw) {
+                break pw;
+            }
+        };
+        let Some(key) = self.derive_new_key(&pw) else {
+            return false;
+        };
+        let old = self.active_doc_mut(|d| d.key.replace(key)).flatten();
+        if !self.write_active(&path) {
+            self.active_doc_mut(|d| d.key = old);
+            dialogs::error_box(self.hwnd(), "保存失败，密码没有修改。");
+            return false;
+        }
+        self.show_message("密码已修改并重新加密保存。请牢记新密码。");
+        true
+    }
+
+    /// 文件 → 另存为不加密的文件：当前文档改为指向新的普通文件，原加密文件不变。
+    pub(super) fn save_decrypted_as(&self) -> bool {
+        let Some(current) = self
+            .active_doc(|d| d.is_encrypted().then(|| d.path.clone()))
+            .flatten()
+        else {
+            self.show_message("当前文档没有加密");
+            return false;
+        };
+        if !dialogs::ask_ok_cancel(
+            self.hwnd(),
+            "另存为不加密的普通文件？\n\n新文件中的内容任何人都能读取；原来的加密文件保持不变。",
+        ) {
+            return false;
+        }
+        // notes.md.hne → notes.md；没有内层扩展名时用 .txt
+        let suggested = current.as_ref().map(|p| {
+            let is_hne = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("hne"));
+            let stripped = if is_hne {
+                p.with_extension("")
+            } else {
+                p.clone()
+            };
+            if stripped.extension().is_some() && is_hne {
+                stripped
+            } else {
+                stripped.with_extension("txt")
+            }
+        });
+        let Some(path) = dialogs::save_file(self.hwnd(), suggested.as_deref()) else {
+            return false;
+        };
+        if current
+            .as_deref()
+            .is_some_and(|c| config::same_path(c, &path))
+            && !dialogs::ask_ok_cancel(
+                self.hwnd(),
+                "这会用明文覆盖原来的加密文件，加密版本将不复存在。\n\n继续吗？",
+            )
+        {
+            return false;
+        }
+        let old_key = self.active_doc_mut(|d| d.key.take()).flatten();
+        self.active_doc_mut(|d| d.enc = EncodingInfo::UTF8);
+        if !self.write_active(&path) {
+            self.active_doc_mut(|d| d.key = old_key);
+            return false;
+        }
+        drop(old_key);
+        let new_lang = lang::index_of(lang::detect(Some(&path), ""));
+        let changed = self.active_doc_mut(|d| {
+            d.path = Some(path.clone());
+            let c = d.lang == 0 && new_lang != 0;
+            if c {
+                d.lang = new_lang;
+            }
+            c
+        });
+        if changed == Some(true) {
+            self.set_active_language(new_lang);
+        }
+        self.show_message("已另存为不加密的普通文件");
+        self.refresh();
+        true
+    }
+
+    // ---- 自测 ----
+
+    /// 自测：用给定的新密码修改当前加密文档的密码（跳过对话框）。
+    pub(crate) fn st_change_password(&self, old: &str, new: &str) -> Result<(), String> {
+        let (key, path) = self
+            .active_doc(|d| d.key.clone().zip(d.path.clone()))
+            .flatten()
+            .ok_or("not encrypted")?;
+        if !key.verify(old).map_err(|e| e.to_string())? {
+            return Err("old password rejected".into());
+        }
+        if key.verify(new).map_err(|e| e.to_string())? && old != new {
+            return Err("new password accepted by old key".into());
+        }
+        let k = Key::generate(new, KdfParams::default()).map_err(|e| e.to_string())?;
+        let prev = self.active_doc_mut(|d| d.key.replace(k)).flatten();
+        if !self.write_active(&path) {
+            self.active_doc_mut(|d| d.key = prev);
+            return Err("write failed".into());
+        }
+        Ok(())
     }
 
     // ---- 外部修改 ----

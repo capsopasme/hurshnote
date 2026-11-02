@@ -24,6 +24,9 @@ pub const IDM_SET_AUTO_RELOAD: u16 = 1012;
 pub const IDM_FILE_QUICK_OPEN: u16 = 1013;
 pub const IDM_WS_ADD: u16 = 1014;
 pub const IDM_SET_GITIGNORE: u16 = 1015;
+pub const IDM_FILE_PRINT: u16 = 1016;
+pub const IDM_FILE_CHANGE_PASSWORD: u16 = 1017;
+pub const IDM_FILE_SAVE_DECRYPTED: u16 = 1018;
 
 // ---- 编辑 ----
 pub const IDM_EDIT_UNDO: u16 = 1101;
@@ -100,6 +103,7 @@ pub const IDM_VIEW_SWITCH_FOCUS: u16 = 1615;
 pub const IDM_VIEW_MOVE_OTHER: u16 = 1616;
 pub const IDM_VIEW_HEX: u16 = 1617;
 pub const IDM_VIEW_TAIL: u16 = 1618;
+pub const IDM_VIEW_MD_PREVIEW: u16 = 1619;
 
 // ---- 运行 / 终端 ----
 pub const IDM_RUN_PYTHON: u16 = 1801;
@@ -114,6 +118,11 @@ pub const IDM_TERM_NEW_CMD: u16 = 1813;
 pub const IDM_TERM_NEW_PWSH: u16 = 1814;
 pub const IDM_TERM_CLOSE: u16 = 1815;
 pub const IDM_DRAWER_HIDE: u16 = 1816;
+
+// ---- 宏 ----
+pub const IDM_MACRO_RECORD: u16 = 1950;
+pub const IDM_MACRO_PLAY: u16 = 1951;
+pub const IDM_MACRO_PLAY_MULTI: u16 = 1952;
 
 // ---- 窗口 / 帮助 ----
 pub const IDM_WIN_NEXT: u16 = 1701;
@@ -253,6 +262,9 @@ pub static KEYS: &[Key] = &[
     k(IDM_RUN_IN_TERMINAL, C, VK_F5),
     k(IDM_TERM_TOGGLE, C, VK_OEM_3),
     k(IDM_TERM_NEW, C | S, VK_OEM_3),
+    k(IDM_VIEW_MD_PREVIEW, C | S, ch(b'M')),
+    k(IDM_MACRO_RECORD, C | S, ch(b'R')),
+    k(IDM_MACRO_PLAY, C | S, ch(b'P')),
 ];
 
 fn key_name(vk: u16) -> String {
@@ -351,7 +363,9 @@ const FILE: &[Item] = &[
     Cmd(IDM_FILE_SAVE, "保存(&S)"),
     Cmd(IDM_FILE_SAVE_AS, "另存为(&A)..."),
     Cmd(IDM_FILE_SAVE_ALL, "全部保存(&L)"),
-    Cmd(IDM_FILE_SAVE_ENCRYPTED, "另存为加密文件(&E)..."),
+    Sub("加密(&E)", ENCRYPTION),
+    Sep,
+    Cmd(IDM_FILE_PRINT, "打印(&P)..."),
     Sep,
     Cmd(IDM_FILE_CLOSE, "关闭(&C)"),
     Cmd(IDM_FILE_CLOSE_ALL, "全部关闭"),
@@ -359,6 +373,12 @@ const FILE: &[Item] = &[
     Sub("设置(&T)", SETTINGS),
     Sep,
     Cmd(IDM_FILE_EXIT, "退出(&X)\tAlt+F4"),
+];
+
+const ENCRYPTION: &[Item] = &[
+    Cmd(IDM_FILE_SAVE_ENCRYPTED, "另存为加密文件(&E)..."),
+    Cmd(IDM_FILE_CHANGE_PASSWORD, "修改密码(&W)..."),
+    Cmd(IDM_FILE_SAVE_DECRYPTED, "另存为不加密的文件(&D)..."),
 ];
 
 const SETTINGS: &[Item] = &[
@@ -466,6 +486,7 @@ const VIEW: &[Item] = &[
     Cmd(IDM_VIEW_SIDEBAR, "侧边栏(&B)"),
     Sub("分屏(&P)", SPLIT),
     Sep,
+    Cmd(IDM_VIEW_MD_PREVIEW, "Markdown 预览(&M)"),
     Cmd(IDM_VIEW_HEX, "Hex 视图(&X)"),
     Cmd(IDM_VIEW_TAIL, "Tail 模式：跟随文件末尾(&T)"),
     Sep,
@@ -502,6 +523,12 @@ const RUN: &[Item] = &[
     Sep,
     Cmd(IDM_VIEW_OUTPUT, "输出面板(&P)"),
     Cmd(IDM_DRAWER_HIDE, "隐藏底部面板(&H)"),
+];
+
+const MACRO: &[Item] = &[
+    Cmd(IDM_MACRO_RECORD, "录制宏(&R)"),
+    Cmd(IDM_MACRO_PLAY, "回放(&P)"),
+    Cmd(IDM_MACRO_PLAY_MULTI, "多次回放(&M)..."),
 ];
 
 const ENCODING: &[Item] = &[EncReopen("重新打开为(&R)"), EncConvert("转换为(&C)")];
@@ -607,12 +634,13 @@ pub fn build_main_menu() -> Menus {
     let bar = unsafe { CreateMenu() };
     let mut recent = None;
     let mut window = std::ptr::null_mut();
-    let tops: [(&str, &[Item]); 9] = [
+    let tops: [(&str, &[Item]); 10] = [
         ("文件(&F)", FILE),
         ("编辑(&E)", EDIT),
         ("搜索(&S)", SEARCH),
         ("视图(&V)", VIEW),
         ("运行(&R)", RUN),
+        ("宏(&M)", MACRO),
         ("编码(&N)", ENCODING),
         ("语言(&L)", &[]),
         ("窗口(&W)", WINDOW),

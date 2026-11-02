@@ -978,7 +978,12 @@ impl App {
             | IDM_WIN_NEXT
             | IDM_WIN_PREV
             | IDM_HELP_ABOUT => false,
-            IDM_VIEW_WRAP..=IDM_VIEW_TAIL => false,
+            IDM_VIEW_WRAP..=IDM_VIEW_MD_PREVIEW => false,
+            // 终端、运行、在文件中查找、宏、打印与当前文档是否可编辑无关（宏回放与打印自己会提示）
+            IDM_RUN_PYTHON..=IDM_DRAWER_HIDE
+            | IDM_SEARCH_IN_FILES
+            | IDM_MACRO_RECORD..=IDM_MACRO_PLAY_MULTI
+            | IDM_FILE_PRINT => false,
             IDM_CTX_CLOSE..=IDM_CTX_REVEAL | IDM_TREE_OPEN..=IDM_TREE_REMOVE_ROOT => false,
             x if (IDM_ENC_REOPEN_BASE..IDM_ENC_REOPEN_BASE + 100).contains(&x) && !embedded => {
                 false

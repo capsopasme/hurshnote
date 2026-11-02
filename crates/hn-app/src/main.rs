@@ -33,6 +33,8 @@ mod instance;
 #[cfg(windows)]
 mod lview;
 #[cfg(windows)]
+mod mdview;
+#[cfg(windows)]
 mod pwdlg;
 #[cfg(windows)]
 mod selftest;

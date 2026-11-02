@@ -9,6 +9,7 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, SendMessageW};
 
 pub mod langs;
@@ -34,6 +35,46 @@ const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_TABSTOP: u32 = 0x0001_0000;
 const WS_CLIPCHILDREN: u32 = 0x0200_0000;
+const WM_SETREDRAW: u32 = 0x000B;
+
+/// `Sci_Rectangle`
+#[repr(C)]
+struct SciRectangle {
+    left: c_int,
+    top: c_int,
+    right: c_int,
+    bottom: c_int,
+}
+
+/// `Sci_RangeToFormatFull`
+#[repr(C)]
+struct RangeToFormatFull {
+    hdc: *mut c_void,
+    hdc_target: *mut c_void,
+    rc: SciRectangle,
+    rc_page: SciRectangle,
+    cp_min: isize,
+    cp_max: isize,
+}
+
+/// 读取 `SCN_MACRORECORD` 通知中消息的字符串参数（必须在通知处理中立即调用：指针只在通知期间有效）。
+///
+/// `SCI_REPLACESEL`、`SCI_INSERTTEXT`、`SCI_SEARCHNEXT`、`SCI_SEARCHPREV` 的 lParam 是以 NUL 结尾的字符串；
+/// `SCI_ADDTEXT`、`SCI_APPENDTEXT` 的 wParam 是长度。其他消息没有字符串参数。
+pub unsafe fn macro_text(msg: u32, wparam: usize, lparam: isize) -> Option<String> {
+    if lparam == 0 {
+        return None;
+    }
+    let p = lparam as *const u8;
+    let bytes: &[u8] = match msg {
+        SCI_REPLACESEL | SCI_INSERTTEXT | SCI_SEARCHNEXT | SCI_SEARCHPREV => {
+            unsafe { std::ffi::CStr::from_ptr(p as *const c_char) }.to_bytes()
+        }
+        SCI_ADDTEXT | SCI_APPENDTEXT => unsafe { std::slice::from_raw_parts(p, wparam) },
+        _ => return None,
+    };
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
 
 /// 注册 Scintilla 窗口类。程序启动时调用一次，`hinstance` 为本模块句柄。
 pub unsafe fn register_classes(hinstance: *mut c_void) -> bool {
@@ -323,6 +364,44 @@ impl Sci {
 
     pub fn release_document(&self, doc: isize) {
         self.send(SCI_RELEASEDOCUMENT, 0, doc);
+    }
+
+    /// 打开或关闭重绘（批量改样式时避免闪烁）。关闭后再打开会整窗重绘。
+    pub fn set_redraw(&self, on: bool) {
+        unsafe {
+            SendMessageW(self.hwnd, WM_SETREDRAW, on as usize, 0);
+            if on {
+                InvalidateRect(self.hwnd, ptr::null(), 1);
+            }
+        }
+    }
+
+    /// 打印排版（`SCI_FORMATRANGEFULL`）：把 `[start, end)` 中能放进 `rc` 的部分画到 `hdc`（`draw` 为假时只计算），
+    /// 返回下一页的起始位置。矩形为设备坐标 (left, top, right, bottom)。
+    pub fn format_range(
+        &self,
+        draw: bool,
+        hdc: *mut c_void,
+        rc: (i32, i32, i32, i32),
+        page: (i32, i32, i32, i32),
+        start: usize,
+        end: usize,
+    ) -> usize {
+        let rect = |r: (i32, i32, i32, i32)| SciRectangle {
+            left: r.0,
+            top: r.1,
+            right: r.2,
+            bottom: r.3,
+        };
+        let fr = RangeToFormatFull {
+            hdc,
+            hdc_target: hdc,
+            rc: rect(rc),
+            rc_page: rect(page),
+            cp_min: start as isize,
+            cp_max: end as isize,
+        };
+        self.send(SCI_FORMATRANGEFULL, draw as usize, &fr as *const _ as isize) as usize
     }
 
     /// 创建文档加载器（只能在 UI 线程调用）；可交给后台线程填充。

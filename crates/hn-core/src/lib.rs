@@ -5,8 +5,10 @@
 //! - [`payload`]：文档内容 + 元数据的二进制布局（加密文档与快照共用）
 //! - [`snapshot`]：快照文件格式与快照目录管理
 //! - [`session`]：会话清单（JSON）
+//! - [`macros`]：宏的步骤序列与持久化
 
 pub mod atomic;
+pub mod macros;
 pub mod payload;
 pub mod session;
 pub mod snapshot;

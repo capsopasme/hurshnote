@@ -61,6 +61,8 @@ pub(super) enum Drag {
     DocReorder(usize),
     /// 编辑区与底部抽屉之间
     Drawer,
+    /// 编辑区与 Markdown 预览之间
+    Preview,
 }
 
 fn px(v: i32, dpi: u32) -> i32 {
@@ -356,6 +358,7 @@ impl App {
             }
             Drag::DocReorder(_) => 32649, // IDC_HAND
             Drag::Drawer => IDC_SIZENS,
+            Drag::Preview => IDC_SIZEWE,
         }
     }
 
@@ -415,6 +418,7 @@ impl App {
                 let h = ((bottom - y) * 96 / dpi as i32).clamp(80, 2000);
                 self.settings.borrow_mut().drawer_height = h;
             }
+            Drag::Preview => self.drag_preview(x),
             Drag::DocReorder(_) => return,
         }
         self.layout();

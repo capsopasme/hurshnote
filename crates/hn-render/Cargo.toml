@@ -1,6 +1,6 @@
 [package]
 name = "hn-render"
-description = "HurshNote 共享渲染设施：Direct2D / DirectWrite 封装（大文件视图、Hex 视图，之后的终端与 Markdown 预览共用）"
+description = "HurshNote 共享渲染设施：Direct2D / DirectWrite / WIC 封装（大文件视图、Hex 视图、终端、Markdown 预览共用）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,6 +15,9 @@ windows = { workspace = true, features = [
   "Win32_Graphics_Direct2D_Common",
   "Win32_Graphics_DirectWrite",
   "Win32_Graphics_Dxgi_Common",
+  # Markdown 预览的图片解码（WIC）
+  "Win32_Graphics_Imaging",
+  "Win32_System_Com",
 ] }
 
 [lints]

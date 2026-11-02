@@ -51,6 +51,12 @@ pub struct Settings {
     /// 目录搜索：文件类型与排除项（逗号或分号分隔的通配符）
     pub dir_include: String,
     pub dir_exclude: String,
+    /// Markdown 文档显示分栏预览
+    pub md_preview: bool,
+    /// 预览占编辑区宽度的比例
+    pub md_preview_ratio: f32,
+    /// 已看过首次加密的说明
+    pub crypto_warned: bool,
 }
 
 impl Default for Settings {
@@ -79,6 +85,9 @@ impl Default for Settings {
             terminal_shell: "powershell".into(),
             dir_include: String::new(),
             dir_exclude: "node_modules".into(),
+            md_preview: true,
+            md_preview_ratio: 0.5,
+            crypto_warned: false,
         }
     }
 }
@@ -119,6 +128,9 @@ fn sanitize(mut s: Settings) -> Settings {
         s.sidebar_split = 0.35;
     }
     s.drawer_height = s.drawer_height.clamp(80, 2000);
+    if !(0.15..=0.85).contains(&s.md_preview_ratio) {
+        s.md_preview_ratio = 0.5;
+    }
     if s.terminal_shell.trim().is_empty() {
         s.terminal_shell = "powershell".into();
     }

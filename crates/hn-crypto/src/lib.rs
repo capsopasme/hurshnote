@@ -147,6 +147,17 @@ impl Key {
     pub fn params(&self) -> KdfParams {
         self.params
     }
+
+    /// 密码是否与这个密钥对应（用同一 salt 与参数重新派生后按常数时间比较）。修改密码前用来确认旧密码。
+    pub fn verify(&self, password: &str) -> Result<bool, Error> {
+        let other = Key::derive(password, self.salt, self.params)?;
+        let diff = self
+            .key
+            .iter()
+            .zip(other.key.iter())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+        Ok(diff == 0)
+    }
 }
 
 /// 解析出的头部。
@@ -382,5 +393,17 @@ mod tests {
             }
             assert!(open(&key, &f).is_err());
         }
+    }
+
+    #[test]
+    fn verify_password() {
+        let k = Key::generate("正确的密码", FAST).unwrap();
+        assert!(k.verify("正确的密码").unwrap());
+        assert!(!k.verify("错误的密码").unwrap());
+        assert!(!k.verify("").unwrap());
+        // 换了 salt 的同一密码不是同一个密钥
+        let k2 = Key::generate("正确的密码", FAST).unwrap();
+        assert!(k2.verify("正确的密码").unwrap());
+        assert_ne!(k.salt, k2.salt);
     }
 }
